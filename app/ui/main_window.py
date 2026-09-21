@@ -422,11 +422,34 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(False)
         l.addWidget(self.table)
 
+        controls = QHBoxLayout()
         r = QPushButton("[ REFRESH ACCOUNTS ]")
         r.clicked.connect(self.refresh_accounts)
-        l.addWidget(r)
+        reset = QPushButton("[ CLEAR LOCAL STOP / ERROR ]")
+        reset.clicked.connect(self.reset_selected_account)
+        controls.addWidget(r)
+        controls.addWidget(reset)
+        l.addLayout(controls)
         self.refresh_accounts()
         return w
+
+    def reset_selected_account(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "ACCOUNT", "복구할 계정을 선택하세요.")
+            return
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        account_id = int(item.text())
+        self.send_engine.clear_local_account_stop(account_id)
+        self.refresh_accounts()
+        QMessageBox.information(
+            self,
+            "LOCAL RESET",
+            "프로그램 내부 정지/오류 상태를 초기화했습니다.\n"
+            "다음 발송 시 실제 Telegram 세션과 제한 상태를 다시 확인합니다."
+        )
 
     def import_sessions(self):
         path, _ = QFileDialog.getOpenFileName(self, "Session ZIP 선택", "", "ZIP (*.zip)")
