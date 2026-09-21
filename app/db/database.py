@@ -5,6 +5,7 @@ from app.core.paths import DB_PATH
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -40,16 +41,41 @@ CREATE TABLE IF NOT EXISTS recipients (
     telegram_message_id TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    processed_at TEXT,
     sent_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    postbot_link TEXT,
+    postbot_username TEXT NOT NULL DEFAULT '@PostBot',
+    post_code TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'DRAFT',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    total_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT,
+    finished_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS campaign_recipients (
+    campaign_id INTEGER NOT NULL,
+    recipient_id INTEGER NOT NULL,
+    assigned_account_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ASSIGNED',
+    error_code TEXT,
+    error_message TEXT,
+    telegram_message_id TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (campaign_id, recipient_id),
+    FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+    FOREIGN KEY (recipient_id) REFERENCES recipients(id),
+    FOREIGN KEY (assigned_account_id) REFERENCES telegram_accounts(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_recipient_worker
+ON campaign_recipients(campaign_id, assigned_account_id, status);
 
 CREATE TABLE IF NOT EXISTS work_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,11 +95,15 @@ class Database:
 
     @contextmanager
     def connection(self):
-        conn = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
+        conn = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -86,9 +116,18 @@ class Database:
             cur = conn.execute(sql, params)
             return cur.lastrowid
 
+    def execute_rowcount(self, sql, params=()):
+        with self.connection() as conn:
+            cur = conn.execute(sql, params)
+            return cur.rowcount
+
     def fetchall(self, sql, params=()):
         with self.connection() as conn:
             return list(conn.execute(sql, params).fetchall())
+
+    def fetchone(self, sql, params=()):
+        rows = self.fetchall(sql, params)
+        return rows[0] if rows else None
 
     def set_setting(self, key, value):
         self.execute(
@@ -98,5 +137,5 @@ class Database:
         )
 
     def get_setting(self, key, default=""):
-        rows = self.fetchall("SELECT value FROM settings WHERE key=?", (key,))
-        return rows[0]["value"] if rows else default
+        row = self.fetchone("SELECT value FROM settings WHERE key=?", (key,))
+        return row["value"] if row else default
