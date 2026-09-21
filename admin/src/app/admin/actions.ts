@@ -27,7 +27,7 @@ export async function licenseAction(formData: FormData) {
     base.setDate(base.getDate()+30);
     await service.from("angeltoggle_licenses").update({expires_at:base.toISOString(),status:"ACTIVE",updated_at:new Date().toISOString()}).eq("id",id);
   } else if (action === "reset_devices") {
-    await service.from("angeltoggle_license_devices").update({revoked_at:new Date().toISOString()}).eq("license_id",id).is("revoked_at",null);
+    await service.from("angeltoggle_license_devices").delete().eq("license_id",id);
   }
 
   await service.from("angeltoggle_license_events").insert({license_id:id,event_type:"ADMIN_"+action.toUpperCase()});
