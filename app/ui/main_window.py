@@ -9,6 +9,7 @@ from app.services.db_import_service import DBImportService
 from app.services.session_service import SessionService
 from app.services.send_engine import SendEngine
 from app.services.update_service import UpdateService
+from app.ui.chat_viewer import ChatViewerDialog
 
 
 class 신호브리지(QObject):
@@ -629,12 +630,30 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         refresh = QPushButton("[ 계정 새로고침 ]")
         refresh.clicked.connect(self.refresh_accounts)
+        chats = QPushButton("[ 선택 계정 대화창 보기 ]")
+        chats.clicked.connect(self.open_selected_account_chats)
         reset = QPushButton("[ 선택 계정 프로그램 정지/오류 해제 ]")
         reset.clicked.connect(self.reset_selected_account)
         row.addWidget(refresh)
+        row.addWidget(chats)
         row.addWidget(reset)
         l.addLayout(row)
         return w
+
+    def open_selected_account_chats(self):
+        row = self.account_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "계정 선택", "대화창을 볼 계정을 먼저 선택하세요.")
+            return
+
+        item = self.account_table.item(row, 0)
+        if not item:
+            return
+
+        account_id = int(item.text())
+        dialog = ChatViewerDialog(self.db, self.logs, account_id, self)
+        dialog.setStyleSheet(CMD_STYLE)
+        dialog.exec()
 
     def import_sessions(self):
         path, _ = QFileDialog.getOpenFileName(self, "세션 ZIP 선택", "", "ZIP (*.zip)")
