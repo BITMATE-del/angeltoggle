@@ -121,7 +121,7 @@ QFrame#콘솔패널 {
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, db, logs):
+    def __init__(self, db, logs, license_info=None):
         super().__init__()
         self.db = db
         self.logs = logs
@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self.session_import = SessionService(db, logs)
         self.send_engine = SendEngine(db, logs)
         self.update_service = UpdateService(logs)
+        self.license_info = license_info or {}
 
         self.bridge = 신호브리지()
         self.bridge.로그.connect(self.append_log)
@@ -151,10 +152,14 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         brand = QLabel("엔젤토글.exe")
         brand.setObjectName("제목")
+        self.license_state = QLabel(self._license_badge_text())
+        self.license_state.setStyleSheet("color:#FFD66C;font-weight:800;")
         self.top_state = QLabel("[ 시스템 정상 ]")
         self.top_state.setStyleSheet("color:#6CFF9B;font-weight:800;")
         top.addWidget(brand)
         top.addStretch()
+        top.addWidget(self.license_state)
+        top.addSpacing(16)
         top.addWidget(self.top_state)
         outer.addLayout(top)
 
@@ -198,6 +203,21 @@ class MainWindow(QMainWindow):
         self.refresh_summary()
         self.refresh_accounts()
         self.refresh_work_status()
+
+    def _license_badge_text(self):
+        remaining = self.license_info.get("remaining_days")
+        if remaining is None:
+            return "[ 라이선스 확인 필요 ]"
+        return f"[ 라이선스 {remaining}일 남음 ]"
+
+    def _format_license_expiry(self, value):
+        if not value:
+            return "확인 필요"
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(value)
 
     def title(self, text, command):
         box = QWidget()
@@ -244,12 +264,20 @@ class MainWindow(QMainWindow):
         pending = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE status='PENDING'")["c"]
         added = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE contact_status='ADDED'")["c"]
         sent = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE status='MESSAGE_SENT'")["c"]
+        remaining = self.license_info.get("remaining_days")
+        expires_at = self._format_license_expiry(self.license_info.get("expires_at"))
+        offline = "오프라인 유예" if self.license_info.get("offline") else "서버 인증"
+        remaining_text = f"{remaining}일" if remaining is not None else "확인 필요"
+
         self.summary.setText(
             f"[등록 계정]       {ac:>7}개\n"
             f"[전체 고객 DB]    {rc:>7}명\n"
             f"[사용 가능 DB]    {pending:>7}명\n"
             f"[연락처 추가완료] {added:>7}명\n"
-            f"[게시물 발송완료] {sent:>7}명\n\n"
+            f"[게시물 발송완료] {sent:>7}명\n"
+            f"[라이선스]        {remaining_text:>7} 남음\n"
+            f"[만료일]          {expires_at}\n"
+            f"[인증상태]        {offline}\n\n"
             f"C:\\엔젤토글> 시스템 상태 = 정상"
         )
 
