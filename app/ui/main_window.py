@@ -433,6 +433,32 @@ class MainWindow(QMainWindow):
             self.bridge.작업완료.emit("오류", str(e))
 
     def on_task_finished(self, kind, result):
+        if kind == "업데이트확인":
+            self.update_label.setText(result["text"])
+            info = result.get("info")
+            if info and info.get("available"):
+                if self.worker_thread and self.worker_thread.is_alive():
+                    self.update_label.setText(
+                        result["text"] + " / 현재 작업 종료 후 다음 실행에서 자동 업데이트됩니다."
+                    )
+                    return
+                self.top_state.setText("[ 업데이트 설치중 ]")
+                self.update_label.setText(result["text"] + " / 새 버전을 자동 설치합니다.")
+                threading.Thread(
+                    target=self._apply_update_worker,
+                    args=(info["download_url"],),
+                    daemon=True,
+                ).start()
+            return
+
+        if kind == "업데이트설치":
+            if result.get("ok"):
+                QApplication.instance().quit()
+            else:
+                self.top_state.setText("[ 시스템 정상 ]")
+                self.update_label.setText("자동 업데이트 실패: " + result.get("error", "알 수 없는 오류"))
+            return
+
         self._set_busy(False)
         self.refresh_summary()
         self.refresh_work_status()
@@ -749,3 +775,10 @@ class MainWindow(QMainWindow):
             self.bridge.작업완료.emit("업데이트확인", {"text": text, "info": info})
         except Exception as e:
             self.bridge.작업완료.emit("업데이트확인", {"text": f"업데이트 확인 실패: {e}", "info": None})
+
+    def _apply_update_worker(self, download_url):
+        try:
+            self.update_service.download_and_replace(download_url)
+            self.bridge.작업완료.emit("업데이트설치", {"ok": True})
+        except Exception as e:
+            self.bridge.작업완료.emit("업데이트설치", {"ok": False, "error": str(e)})
