@@ -38,14 +38,31 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
+      - name: Verify required stdlib modules
+        shell: pwsh
+        run: |
+          python -c "import pyexpat, xml.parsers.expat, xml.etree.ElementTree; print('XML stdlib OK')"
+
       - name: Build portable EXE
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "AngelToggle" main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name "AngelToggle" --hidden-import pyexpat --hidden-import xml.parsers.expat --hidden-import xml.etree.ElementTree --hidden-import xml.dom.minidom --collect-submodules xml main.py
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item dist\AngelToggle.exe release\AngelToggle.exe
           Copy-Item README.md release\README.md
           Compress-Archive -Path release\* -DestinationPath AngelToggle-Windows.zip -Force
+
+      - name: Smoke test packaged EXE
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\dist\AngelToggle.exe" -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited -and $p.ExitCode -ne 0) {
+            throw "AngelToggle.exe exited during smoke test with code $($p.ExitCode)"
+          }
+          if (-not $p.HasExited) {
+            Stop-Process -Id $p.Id -Force
+          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
