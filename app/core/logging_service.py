@@ -1,12 +1,15 @@
 from datetime import datetime
+import threading
 
 class LogService:
     def __init__(self, db):
         self.db = db
         self.listeners = []
+        self._lock = threading.Lock()
 
     def subscribe(self, callback):
-        self.listeners.append(callback)
+        with self._lock:
+            self.listeners.append(callback)
 
     def write(self, level, category, message, account_id=None, campaign_id=None, recipient_id=None):
         self.db.execute(
@@ -18,9 +21,13 @@ class LogService:
             "level": level,
             "category": category,
             "message": message,
-            "account_id": account_id
+            "account_id": account_id,
+            "campaign_id": campaign_id,
+            "recipient_id": recipient_id,
         }
-        for cb in self.listeners[:]:
+        with self._lock:
+            listeners = self.listeners[:]
+        for cb in listeners:
             try:
                 cb(item)
             except Exception:
