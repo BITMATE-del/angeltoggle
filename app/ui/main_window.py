@@ -1,8 +1,14 @@
-from PySide6.QtCore import Qt
+import threading
+from datetime import datetime
+from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import *
 from app.services.db_import_service import DBImportService
 from app.services.session_service import SessionService
+from app.services.send_engine import SendEngine
+
+class LogBridge(QObject):
+    line = Signal(dict)
 
 TERMINAL_STYLE = """
 QMainWindow, QWidget {
@@ -111,6 +117,11 @@ class MainWindow(QMainWindow):
         self.logs = logs
         self.db_import = DBImportService(db, logs)
         self.session_import = SessionService(db, logs)
+        self.send_engine = SendEngine(db, logs)
+        self.log_bridge = LogBridge()
+        self.log_bridge.line.connect(self.append_log)
+        self.logs.subscribe(lambda item: self.log_bridge.line.emit(item))
+        self.send_thread = None
 
         self.setWindowTitle("엔젤토글 // ANGEL TOGGLE")
         self.setMinimumSize(1100, 700)
@@ -168,7 +179,6 @@ class MainWindow(QMainWindow):
 
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.nav.setCurrentRow(0)
-        self.logs.subscribe(self.append_log)
 
     def title(self, text, command=None):
         box = QWidget()
@@ -234,57 +244,106 @@ class MainWindow(QMainWindow):
     def oneclick(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(self.title("원클릭 발송", "C:\\ANGELTOGGLE> send --preflight --auto"))
+        l.addWidget(self.title("원클릭 발송", "C:\\ANGELTOGGLE> send --preflight --auto --parallel"))
 
         info = QLabel(
-            "하나의 버튼으로 API / 세션 / 고객 DB / PostBot 게시물을 검사하고\n"
-            "발송 준비 상태를 자동으로 정리합니다."
+            "버튼 한 번으로 사전점검 → 캠페인 생성 → 계정별 고정배정 → 병렬 Worker 실행 → 결과 저장까지 처리합니다.\n"
+            "한 계정에 오류가 발생해도 다른 계정 Worker는 계속 실행됩니다."
         )
         info.setObjectName("StatusPanel")
         l.addWidget(info)
 
         self.precheck = QTextEdit()
         self.precheck.setReadOnly(True)
-        self.precheck.setMaximumHeight(220)
+        self.precheck.setMaximumHeight(240)
         self.precheck.setPlainText(
             "$ waiting for command...\n"
             "[ ] Telegram API\n"
             "[ ] Telegram Sessions\n"
             "[ ] Customer DB\n"
-            "[ ] PostBot"
+            "[ ] PostBot\n"
+            "\nREADY_TO_SEND=FALSE"
         )
         l.addWidget(self.precheck)
 
-        b = QPushButton(">> RUN ONE-CLICK PREFLIGHT")
-        b.setMinimumHeight(64)
-        b.clicked.connect(self.run_precheck)
-        l.addWidget(b)
+        self.send_button = QPushButton(">> RUN ONE-CLICK SEND")
+        self.send_button.setMinimumHeight(70)
+        self.send_button.clicked.connect(self.run_oneclick)
+        l.addWidget(self.send_button)
         l.addStretch()
         return w
 
-    def run_precheck(self):
+    def _preflight(self):
         api_ok = bool(self.db.get_setting("telegram_api_id")) and bool(self.db.get_setting("telegram_api_hash"))
-        accounts = self.db.fetchall("SELECT COUNT(*) c FROM telegram_accounts")[0]["c"]
+        accounts = self.db.fetchall(
+            "SELECT COUNT(*) c FROM telegram_accounts WHERE enabled=1 "
+            "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED')"
+        )[0]["c"]
         recipients = self.db.fetchall("SELECT COUNT(*) c FROM recipients WHERE status='PENDING'")[0]["c"]
         post = bool(self.db.get_setting("postbot_link"))
-        checks = [
+        return [
             ("Telegram API", api_ok),
             ("Telegram Sessions", accounts > 0),
             ("Customer DB", recipients > 0),
             ("PostBot", post),
         ]
+
+    def run_oneclick(self):
+        if self.send_thread and self.send_thread.is_alive():
+            QMessageBox.information(self, "RUNNING", "이미 발송 작업이 실행 중입니다.")
+            return
+
+        checks = self._preflight()
         lines = ["$ preflight --all"]
         lines += [f"[{'OK' if ok else 'FAIL'}] {name}" for name, ok in checks]
         lines.append("")
-        lines.append("READY_TO_SEND=TRUE" if all(ok for _, ok in checks) else "READY_TO_SEND=FALSE")
+        ready = all(ok for _, ok in checks)
+        lines.append("READY_TO_SEND=TRUE" if ready else "READY_TO_SEND=FALSE")
         self.precheck.setPlainText("\n".join(lines))
 
-        if all(ok for _, ok in checks):
-            self.logs.write("SUCCESS", "SYSTEM", "원클릭 사전점검 완료")
-            QMessageBox.information(self, "PRECHECK OK", "모든 필수 준비가 완료되었습니다.")
-        else:
+        if not ready:
             self.logs.write("WARNING", "SYSTEM", "원클릭 사전점검 미완료")
             QMessageBox.warning(self, "PRECHECK FAILED", "누락된 필수 설정이 있습니다.")
+            return
+
+        try:
+            bot_username = self.db.get_setting("postbot_username", "@PostBot") or "@PostBot"
+            post_code = self.db.get_setting("postbot_link", "")
+            campaign_name = "AUTO_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+            campaign_id = self.send_engine.create_campaign(
+                campaign_name, bot_username, post_code
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "CAMPAIGN ERROR", str(e))
+            return
+
+        self.send_button.setEnabled(False)
+        self.send_button.setText(">> SENDING... WORKERS RUNNING")
+        self.logs.write("SUCCESS", "SYSTEM", f"원클릭 발송 시작 campaign={campaign_id}", campaign_id=campaign_id)
+
+        self.send_thread = threading.Thread(
+            target=self._run_campaign_background,
+            args=(campaign_id,),
+            daemon=True,
+            name=f"AngelToggleCampaign-{campaign_id}",
+        )
+        self.send_thread.start()
+
+    def _run_campaign_background(self, campaign_id):
+        try:
+            self.send_engine.run_campaign(campaign_id)
+        except Exception as e:
+            self.logs.write("ERROR", "SYSTEM", f"캠페인 실행 오류: {type(e).__name__}: {e}", campaign_id=campaign_id)
+        finally:
+            self.log_bridge.line.emit({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "level": "INFO",
+                "category": "UI",
+                "message": "__CAMPAIGN_FINISHED__",
+                "account_id": None,
+                "campaign_id": campaign_id,
+                "recipient_id": None,
+            })
 
     def dbpage(self):
         w = QWidget()
@@ -318,13 +377,21 @@ class MainWindow(QMainWindow):
         l = QVBoxLayout(w)
         l.addWidget(self.title("PostBot 게시물", "C:\\ANGELTOGGLE> postbot configure"))
 
-        hint = QLabel("이미지 + 버튼이 구성된 PostBot 게시물 링크 또는 코드를 등록합니다.")
-        hint.setObjectName("TerminalSub")
+        hint = QLabel(
+            "PostBot에서 만든 이미지 + 버튼 게시물을 등록합니다.\n"
+            "Bot Username은 기본 @PostBot이며, 게시물 코드 또는 공유 링크를 입력하면 됩니다."
+        )
+        hint.setObjectName("StatusPanel")
         l.addWidget(hint)
 
+        form = QFormLayout()
+        self.postbot_username = QLineEdit(self.db.get_setting("postbot_username", "@PostBot") or "@PostBot")
+        self.postbot_username.setPlaceholderText("@PostBot")
         self.postbot_input = QLineEdit(self.db.get_setting("postbot_link"))
-        self.postbot_input.setPlaceholderText("paste PostBot link / code here...")
-        l.addWidget(self.postbot_input)
+        self.postbot_input.setPlaceholderText("post code / PostBot link...")
+        form.addRow("BOT USERNAME", self.postbot_username)
+        form.addRow("POST CODE / LINK", self.postbot_input)
+        l.addLayout(form)
 
         b = QPushButton("[ SAVE POSTBOT CONFIG ]")
         b.clicked.connect(self.save_postbot)
@@ -333,8 +400,10 @@ class MainWindow(QMainWindow):
         return w
 
     def save_postbot(self):
+        username = self.postbot_username.text().strip() or "@PostBot"
+        self.db.set_setting("postbot_username", username)
         self.db.set_setting("postbot_link", self.postbot_input.text().strip())
-        self.logs.write("INFO", "POSTBOT", "PostBot 게시물 설정 저장")
+        self.logs.write("INFO", "POSTBOT", f"PostBot 설정 저장 bot={username}")
         QMessageBox.information(self, "POSTBOT", "게시물 설정을 저장했습니다.")
 
     def accounts(self):
@@ -400,12 +469,20 @@ class MainWindow(QMainWindow):
         return w
 
     def append_log(self, item):
+        if item.get("message") == "__CAMPAIGN_FINISHED__":
+            if hasattr(self, "send_button"):
+                self.send_button.setEnabled(True)
+                self.send_button.setText(">> RUN ONE-CLICK SEND")
+            self.refresh_summary()
+            return
+
         if hasattr(self, "log_view"):
             if self.log_view.toPlainText().startswith("[LOG] waiting"):
                 self.log_view.clear()
             acc = f" account={item['account_id']}" if item.get("account_id") else ""
+            campaign = f" campaign={item['campaign_id']}" if item.get("campaign_id") else ""
             self.log_view.append(
-                f"[{item['time']}] [{item['level']}] [{item['category']}]{acc} :: {item['message']}"
+                f"[{item['time']}] [{item['level']}] [{item['category']}]{campaign}{acc} :: {item['message']}"
             )
 
     def settings(self):
