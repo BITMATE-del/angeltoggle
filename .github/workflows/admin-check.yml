@@ -1,0 +1,30 @@
+name: Check AngelToggle Admin
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "admin/**"
+  workflow_dispatch:
+
+jobs:
+  build-admin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co"
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_build_only"
+      SUPABASE_SECRET_KEY: "sb_secret_build_only"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: admin/package.json
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        run: npm run build
