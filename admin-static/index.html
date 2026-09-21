@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>엔젤토글 판매관리</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#050706;color:#d9ffe7;font-family:Consolas,"D2Coding",monospace}.wrap{max-width:1400px;margin:0 auto;padding:24px}.panel{background:#07100b;border:1px solid #1c5a33;border-radius:10px;padding:18px;margin:14px 0}.title{color:#67ff91}.muted{color:#75a985}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.card{background:#08130d;border:1px solid #173a27;border-radius:8px;padding:16px}.big{font-size:28px;color:#79ff9e;font-weight:800}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.input{background:#020403;color:#c8ffd8;border:1px solid #1d5a35;border-radius:6px;padding:10px;min-width:150px}.btn{background:#0b1b12;color:#79ff9e;border:1px solid #28d862;border-radius:7px;padding:10px 14px;cursor:pointer}.btn.danger{color:#ff8f8f;border-color:#a33}.table{width:100%;border-collapse:collapse}.table th,.table td{padding:9px;border-bottom:1px solid #143721;text-align:left;vertical-align:top}.table th{color:#6cff9b}.codebox{white-space:pre-wrap;background:#020403;border:1px solid #1d5a35;border-radius:8px;padding:12px;max-height:240px;overflow:auto}.hidden{display:none}.login{max-width:520px;margin:80px auto}.status{padding:8px 0;color:#8fdba4}.warn{color:#ffd66c}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="login" class="login panel">
+    <div class="muted">C:\엔젤토글&gt; 판매관리 로그인</div>
+    <h1 class="title">엔젤토글 판매관리</h1>
+    <input id="username" class="input" placeholder="관리자 아이디" style="width:100%;margin:6px 0" value="admin">
+    <input id="password" class="input" type="password" placeholder="관리자 비밀번호" style="width:100%;margin:6px 0">
+    <button id="loginBtn" class="btn" style="width:100%;margin-top:8px">[ 관리자 로그인 ]</button>
+    <div id="loginStatus" class="status"></div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="row" style="justify-content:space-between">
+      <div><div class="muted">C:\엔젤토글&gt; 판매관리</div><h1 class="title">엔젤토글 판매관리 어드민</h1></div>
+      <div><span id="adminInfo" class="muted"></span> <button id="logoutBtn" class="btn">로그아웃</button></div>
+    </div>
+
+    <div id="passwordNotice" class="panel hidden">
+      <div class="warn">초기 비밀번호를 사용 중입니다. 보안을 위해 비밀번호를 변경하세요.</div>
+      <div class="row" style="margin-top:10px">
+        <input id="currentPassword" class="input" type="password" placeholder="현재 비밀번호">
+        <input id="newPassword" class="input" type="password" placeholder="새 비밀번호 (10자 이상)">
+        <button id="changePasswordBtn" class="btn">[ 비밀번호 변경 ]</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">전체 라이선스<div id="cTotal" class="big">0</div></div>
+      <div class="card">사용중<div id="cActive" class="big">0</div></div>
+      <div class="card">미사용 코드<div id="cUnused" class="big">0</div></div>
+      <div class="card">정지<div id="cSuspended" class="big">0</div></div>
+      <div class="card">7일 이내 만료<div id="cExpiring" class="big">0</div></div>
+    </div>
+
+    <div class="panel">
+      <div class="muted">C:\엔젤토글&gt; 기간코드 발급</div>
+      <h2 class="title">라이선스 코드 발급</h2>
+      <div class="row">
+        <select id="product" class="input"></select>
+        <input id="quantity" class="input" type="number" min="1" max="100" value="1" style="width:90px">
+        <input id="customer" class="input" placeholder="고객명">
+        <input id="contact" class="input" placeholder="연락처/텔레그램">
+        <input id="memo" class="input" placeholder="메모">
+        <button id="generateBtn" class="btn">[ 코드 발급 ]</button>
+      </div>
+      <div id="codesWrap" class="hidden" style="margin-top:12px">
+        <b>발급된 코드는 이 화면에서만 원문 확인됩니다.</b>
+        <div id="codes" class="codebox"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between"><h2 class="title">최근 라이선스</h2><button id="refreshBtn" class="btn">새로고침</button></div>
+      <div style="overflow:auto">
+        <table class="table">
+          <thead><tr><th>코드</th><th>상품</th><th>고객</th><th>상태</th><th>활성화</th><th>만료</th><th>PC</th><th>관리</th></tr></thead>
+          <tbody id="licenses"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const API="https://fgyiofykvpkxpeylcocn.supabase.co/functions/v1/angeltoggle-admin-api";
+const $=id=>document.getElementById(id);
+let token=localStorage.getItem("angeltoggle_admin_token")||"";
+
+function fmt(v){if(!v)return "-";try{return new Date(v).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"})}catch{return v}}
+function esc(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+
+async function api(method="GET",body=null){
+  const res=await fetch(API,{
+    method,
+    headers:{"Content-Type":"application/json","X-Admin-Token":token},
+    body:body?JSON.stringify(body):undefined
+  });
+  const data=await res.json();
+  if(!res.ok||!data.ok) throw new Error(data.message||data.error||"요청 실패");
+  return data;
+}
+
+function render(data){
+  $("cTotal").textContent=data.counts.total;
+  $("cActive").textContent=data.counts.active;
+  $("cUnused").textContent=data.counts.unused;
+  $("cSuspended").textContent=data.counts.suspended;
+  $("cExpiring").textContent=data.counts.expiring;
+  $("adminInfo").textContent=(data.username||"")+" · "+(data.role||"");
+  $("passwordNotice").classList.toggle("hidden",!data.must_change_password);
+
+  $("product").innerHTML=(data.products||[]).map(p=>'<option value="'+p.id+'">'+esc(p.name)+' · '+p.duration_days+'일 · '+p.max_devices+'PC</option>').join("");
+
+  $("licenses").innerHTML=(data.licenses||[]).map(l=>{
+    const name=l.angeltoggle_license_products?.name||(l.duration_days+"일");
+    const toggle=l.status==="SUSPENDED"
+      ? '<button class="btn act" data-id="'+l.id+'" data-cmd="resume">재개</button>'
+      : '<button class="btn act" data-id="'+l.id+'" data-cmd="suspend">정지</button>';
+    return '<tr>'+
+      '<td>'+esc(l.code_prefix)+'••••</td>'+
+      '<td>'+esc(name)+'</td>'+
+      '<td>'+esc(l.customer_name||"-")+'</td>'+
+      '<td>'+esc(l.status)+'</td>'+
+      '<td>'+fmt(l.activated_at)+'</td>'+
+      '<td>'+fmt(l.expires_at)+'</td>'+
+      '<td>'+l.max_devices+'</td>'+
+      '<td class="row">'+toggle+
+      '<button class="btn act" data-id="'+l.id+'" data-cmd="extend30">+30일</button>'+
+      '<button class="btn act" data-id="'+l.id+'" data-cmd="reset_devices">기기초기화</button>'+
+      '<button class="btn danger act" data-id="'+l.id+'" data-cmd="revoke">폐기</button>'+
+      '</td></tr>';
+  }).join("");
+
+  document.querySelectorAll(".act").forEach(btn=>{
+    btn.onclick=async()=>{
+      if(btn.dataset.cmd==="revoke"&&!confirm("이 라이선스를 폐기할까요?"))return;
+      try{render(await api("POST",{action:"license_action",id:btn.dataset.id,command:btn.dataset.cmd}))}
+      catch(e){alert(e.message)}
+    };
+  });
+}
+
+async function load(){
+  if(!token)return;
+  try{
+    const data=await api();
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    render(data);
+  }catch{
+    token="";
+    localStorage.removeItem("angeltoggle_admin_token");
+    $("app").classList.add("hidden");
+    $("login").classList.remove("hidden");
+  }
+}
+
+$("loginBtn").onclick=async()=>{
+  $("loginStatus").textContent="로그인 확인 중...";
+  try{
+    const res=await fetch(API,{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"login",username:$("username").value,password:$("password").value})
+    });
+    const data=await res.json();
+    if(!res.ok||!data.ok)throw new Error(data.message||"로그인 실패");
+    token=data.token;
+    localStorage.setItem("angeltoggle_admin_token",token);
+    $("loginStatus").textContent="";
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    render(data);
+  }catch(e){$("loginStatus").textContent=e.message}
+};
+
+$("logoutBtn").onclick=async()=>{
+  try{await api("POST",{action:"logout"})}catch{}
+  token="";localStorage.removeItem("angeltoggle_admin_token");location.reload();
+};
+$("refreshBtn").onclick=load;
+$("generateBtn").onclick=async()=>{
+  try{
+    const data=await api("POST",{
+      action:"generate",
+      product_id:$("product").value,
+      quantity:Number($("quantity").value||1),
+      customer_name:$("customer").value,
+      customer_contact:$("contact").value,
+      memo:$("memo").value
+    });
+    $("codesWrap").classList.remove("hidden");
+    $("codes").textContent=(data.codes||[]).join("\n");
+    render(data);
+  }catch(e){alert(e.message)}
+};
+$("changePasswordBtn").onclick=async()=>{
+  try{
+    await api("POST",{action:"change_password",current_password:$("currentPassword").value,new_password:$("newPassword").value});
+    alert("비밀번호가 변경되었습니다. 다시 로그인하세요.");
+    token="";localStorage.removeItem("angeltoggle_admin_token");location.reload();
+  }catch(e){alert(e.message)}
+};
+
+load();
+</script>
+</body>
+</html>
