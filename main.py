@@ -35,8 +35,9 @@ def main():
         dialog = LicenseDialog(license_service)
         if dialog.exec() != QDialog.Accepted:
             return
+        license_result = license_service.verify_saved()
 
-    win = MainWindow(db, logs)
+    win = MainWindow(db, logs, license_result)
     win.resize(1280, 820)
     win.show()
 
