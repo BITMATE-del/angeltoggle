@@ -154,3 +154,83 @@ class TelegramService:
             if "Flood" in name or "AuthKey" in name or "Session" in name:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("MESSAGE_SEND_FAILED", name)
+
+
+    async def list_dialogs(self, account, limit=100):
+        client = await self.connect_account(account)
+        try:
+            dialogs = await client.get_dialogs(limit=limit)
+            result = []
+            for dialog in dialogs:
+                entity = dialog.entity
+                title = getattr(dialog, "name", None) or getattr(entity, "title", None)
+                if not title:
+                    first = getattr(entity, "first_name", "") or ""
+                    last = getattr(entity, "last_name", "") or ""
+                    title = (first + " " + last).strip()
+                if not title:
+                    title = getattr(entity, "username", None) or str(dialog.id)
+
+                result.append({
+                    "id": int(dialog.id),
+                    "title": title,
+                    "username": getattr(entity, "username", None),
+                    "unread_count": int(getattr(dialog, "unread_count", 0) or 0),
+                    "is_user": bool(getattr(dialog, "is_user", False)),
+                    "is_group": bool(getattr(dialog, "is_group", False)),
+                    "is_channel": bool(getattr(dialog, "is_channel", False)),
+                })
+            return result
+        finally:
+            await client.disconnect()
+
+    async def list_messages(self, account, dialog_id, limit=50):
+        client = await self.connect_account(account)
+        try:
+            dialogs = await client.get_dialogs(limit=None)
+            target = None
+            for dialog in dialogs:
+                if int(dialog.id) == int(dialog_id):
+                    target = dialog.entity
+                    break
+
+            if target is None:
+                raise RuntimeError("선택한 대화방을 찾을 수 없습니다.")
+
+            messages = await client.get_messages(target, limit=limit)
+            result = []
+            me = await client.get_me()
+            my_id = int(getattr(me, "id", 0) or 0)
+
+            for msg in reversed(messages):
+                sender_id = int(getattr(msg, "sender_id", 0) or 0)
+                sender_name = "나" if sender_id == my_id else ""
+                if not sender_name:
+                    try:
+                        sender = await msg.get_sender()
+                        first = getattr(sender, "first_name", "") or ""
+                        last = getattr(sender, "last_name", "") or ""
+                        sender_name = (first + " " + last).strip()
+                        if not sender_name:
+                            sender_name = getattr(sender, "title", None) or getattr(sender, "username", None)
+                    except Exception:
+                        sender_name = None
+                if not sender_name:
+                    sender_name = str(sender_id) if sender_id else "시스템"
+
+                text = getattr(msg, "message", None) or ""
+                media = getattr(msg, "media", None)
+                if media and not text:
+                    text = "[미디어 메시지]"
+
+                date = getattr(msg, "date", None)
+                result.append({
+                    "id": int(getattr(msg, "id", 0) or 0),
+                    "sender": sender_name,
+                    "text": text,
+                    "date": date.astimezone().strftime("%Y-%m-%d %H:%M:%S") if date else "",
+                    "out": bool(getattr(msg, "out", False)),
+                })
+            return result
+        finally:
+            await client.disconnect()
