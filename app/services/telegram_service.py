@@ -1,5 +1,4 @@
 import re
-import secrets
 from telethon import TelegramClient, errors, functions, types
 
 class RecipientError(Exception):
@@ -49,10 +48,10 @@ class TelegramService:
         try:
             api_id = int(self.db.get_setting("telegram_api_id"))
         except Exception:
-            raise RuntimeError("Telegram API ID가 올바르지 않습니다.")
+            raise RuntimeError("텔레그램 API ID가 올바르지 않습니다.")
         api_hash = self.db.get_setting("telegram_api_hash")
         if not api_hash:
-            raise RuntimeError("Telegram API HASH가 없습니다.")
+            raise RuntimeError("텔레그램 API HASH가 없습니다.")
         return api_id, api_hash
 
     def make_client(self, account):
@@ -87,27 +86,36 @@ class TelegramService:
             await client.disconnect()
             raise
 
-    async def import_contact(self, client, phone):
-        e164 = phone_to_e164(phone)
-        contact = types.InputPhoneContact(
-            client_id=secrets.randbits(63),
-            phone=e164,
-            first_name="Customer",
-            last_name="",
-        )
+    async def import_contacts_batch(self, client, targets):
+        contacts = []
+        ids = {}
+        for recipient_id, phone in targets:
+            client_id = int(recipient_id)
+            ids[client_id] = recipient_id
+            contacts.append(types.InputPhoneContact(
+                client_id=client_id,
+                phone=phone_to_e164(phone),
+                first_name="Customer",
+                last_name="",
+            ))
+
         try:
-            result = await client(functions.contacts.ImportContactsRequest([contact]))
-            if not result.users:
-                raise RecipientError("USER_NOT_FOUND", "Telegram 사용자를 찾을 수 없습니다.")
-            return result.users[0]
-        except RecipientError:
-            raise
+            result = await client(functions.contacts.ImportContactsRequest(contacts))
+            users = {u.id: u for u in result.users}
+            success = {}
+            for item in result.imported:
+                recipient_id = ids.get(int(item.client_id))
+                user = users.get(item.user_id)
+                if recipient_id is not None and user is not None:
+                    success[recipient_id] = user
+            missing = [rid for rid, _ in targets if rid not in success]
+            return success, missing
         except errors.FloodWaitError as e:
-            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}s")
+            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
         except errors.PeerFloodError as e:
             raise AccountWorkerError("PEER_FLOOD", str(e))
-        except (errors.PhoneNumberInvalidError, errors.PhoneNumberBannedError) as e:
-            raise RecipientError("INVALID_PHONE", type(e).__name__)
+        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
+            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
         except Exception as e:
             name = type(e).__name__
             if "Flood" in name or "AuthKey" in name or "Session" in name:
@@ -129,12 +137,12 @@ class TelegramService:
             message = await results[0].click(peer)
             message_id = getattr(message, "id", None)
             if not message_id:
-                raise RecipientError("MESSAGE_SEND_FAILED", "Telegram Message ID를 확인하지 못했습니다.")
+                raise RecipientError("MESSAGE_SEND_FAILED", "텔레그램 Message ID를 확인하지 못했습니다.")
             return str(message_id)
         except RecipientError:
             raise
         except errors.FloodWaitError as e:
-            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}s")
+            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
         except errors.PeerFloodError as e:
             raise AccountWorkerError("PEER_FLOOD", str(e))
         except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
