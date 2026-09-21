@@ -1,6 +1,6 @@
 import sys
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QDialog
 
 from app.db.database import Database
 from app.core.logging_service import LogService
@@ -44,5 +44,4 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
-    from PySide6.QtWidgets import QDialog
     main()
