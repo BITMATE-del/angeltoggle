@@ -22,46 +22,122 @@ class SendEngine:
         accounts = self._accounts()
         recipients = self._pending()
         max_per = int(self.db.get_setting("max_contacts_per_account", "40") or 40)
-        capacity = len(accounts) * max_per
-        chosen = recipients[:capacity]
 
         if not accounts:
             raise RuntimeError("사용 가능한 텔레그램 계정이 없습니다.")
-        if not chosen:
+        if not recipients:
             raise RuntimeError("사용 가능한 고객 DB가 없습니다.")
+
+        account_map = {int(a["id"]): a for a in accounts}
+        capacities = {int(a["id"]): max_per for a in accounts}
+        assignments = []
+
+        # 이미 연락처 추가가 성공했던 실패 DB는 기존 계정을 유지한다.
+        for recipient in recipients:
+            if recipient["contact_status"] != "ADDED":
+                continue
+            aid = int(recipient["assigned_account_id"] or 0)
+            if aid in account_map and capacities.get(aid, 0) > 0:
+                assignments.append((recipient, aid, "ADDED"))
+                capacities[aid] -= 1
+
+        assigned_ids = {int(item[0]["id"]) for item in assignments}
+
+        # 연락처가 아직 없는 DB만 남은 계정 용량에 배정한다.
+        for recipient in recipients:
+            if int(recipient["id"]) in assigned_ids:
+                continue
+            target_aid = None
+            for account in accounts:
+                aid = int(account["id"])
+                if capacities.get(aid, 0) > 0:
+                    target_aid = aid
+                    break
+            if target_aid is None:
+                break
+            assignments.append((recipient, target_aid, "WAITING"))
+            capacities[target_aid] -= 1
+
+        if not assignments:
+            raise RuntimeError("현재 계정 용량으로 처리할 고객 DB가 없습니다.")
 
         campaign_id = self.db.execute(
             "INSERT INTO campaigns(name,postbot_username,post_code,status,total_count) "
             "VALUES(?,?,?,'CONTACT_WAITING',?)",
-            (name, bot_username, post_code, len(chosen)),
+            (name, bot_username, post_code, len(assignments)),
         )
 
-        idx = 0
         with self.db.connection() as conn:
-            for account in accounts:
-                for _ in range(max_per):
-                    if idx >= len(chosen):
-                        break
-                    recipient = chosen[idx]
-                    conn.execute(
-                        "INSERT INTO campaign_recipients("
-                        "campaign_id,recipient_id,assigned_account_id,status,contact_status"
-                        ") VALUES(?,?,?,'ASSIGNED','WAITING')",
-                        (campaign_id, recipient["id"], account["id"]),
-                    )
-                    conn.execute(
-                        "UPDATE recipients SET assigned_account_id=?,status='ASSIGNED',"
-                        "contact_status='NOT_ADDED',updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (account["id"], recipient["id"]),
-                    )
-                    idx += 1
+            for recipient, account_id, contact_state in assignments:
+                conn.execute(
+                    "INSERT INTO campaign_recipients("
+                    "campaign_id,recipient_id,assigned_account_id,status,contact_status,contact_added_at"
+                    ") VALUES(?,?,?,'ASSIGNED',?,?)",
+                    (
+                        campaign_id,
+                        recipient["id"],
+                        account_id,
+                        contact_state,
+                        recipient["contact_added_at"] if contact_state == "ADDED" else None,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE recipients SET assigned_account_id=?,status='ASSIGNED',"
+                    "contact_status=?,error_code=NULL,error_message=NULL,"
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (
+                        account_id,
+                        contact_state if contact_state == "ADDED" else "NOT_ADDED",
+                        recipient["id"],
+                    ),
+                )
 
         self.logs.write(
-            "INFO", "시스템",
-            f"작업 #{campaign_id} 생성 / 대상 {len(chosen)}명 / 계정 {len(accounts)}개 / 계정당 최대 {max_per}명",
+            "INFO",
+            "시스템",
+            f"작업 #{campaign_id} 생성 / 대상 {len(assignments)}명 / 계정 {len(accounts)}개 / 계정당 최대 {max_per}명",
             campaign_id=campaign_id,
         )
         return campaign_id
+
+    def reset_failed_recipients(self):
+        rows = self.db.fetchall(
+            "SELECT id,contact_status,assigned_account_id FROM recipients "
+            "WHERE status='FAILED' ORDER BY id"
+        )
+        if not rows:
+            return 0
+
+        count = 0
+        with self.db.connection() as conn:
+            for row in rows:
+                keep_contact = row["contact_status"] == "ADDED" and row["assigned_account_id"] is not None
+
+                if keep_contact:
+                    conn.execute(
+                        "UPDATE recipients SET status='PENDING',"
+                        "error_code=NULL,error_message=NULL,telegram_message_id=NULL,"
+                        "processed_at=NULL,sent_at=NULL,updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=?",
+                        (row["id"],),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE recipients SET status='PENDING',contact_status='NOT_ADDED',"
+                        "assigned_account_id=NULL,telegram_uid=NULL,telegram_username=NULL,"
+                        "contact_name=NULL,contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                        "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (row["id"],),
+                    )
+                count += 1
+
+        self.logs.write(
+            "INFO",
+            "DB",
+            f"실패 DB {count}개를 대기상태로 복구했습니다.",
+        )
+        return count
 
     def run_contact_stage(self, campaign_id):
         account_rows = self.db.fetchall(
