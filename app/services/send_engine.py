@@ -90,6 +90,169 @@ class SendEngine:
     def _pending(self):
         return self.db.fetchall("SELECT * FROM recipients WHERE status='PENDING' ORDER BY id")
 
+    def create_manual_assignment_campaign(
+        self,
+        account_ids,
+        name,
+        bot_username,
+        post_code,
+    ):
+        account_ids = sorted({int(x) for x in (account_ids or [])})
+        if not account_ids:
+            raise RuntimeError("DB를 배정할 텔레그램 계정을 체크해주세요.")
+
+        marks = ",".join("?" for _ in account_ids)
+        accounts = self.db.fetchall(
+            f"SELECT * FROM telegram_accounts "
+            f"WHERE id IN ({marks}) AND enabled=1 "
+            f"AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT',"
+            f"'SESSION_ERROR','STOPPED','WORKER_ERROR') "
+            f"ORDER BY id",
+            tuple(account_ids),
+        )
+
+        if not accounts:
+            raise RuntimeError("선택한 계정 중 DB를 배정할 수 있는 정상 계정이 없습니다.")
+
+        valid_ids = {int(a["id"]) for a in accounts}
+        excluded = len(account_ids) - len(valid_ids)
+
+        max_per = int(self.db.get_setting("max_contacts_per_account", "40") or 40)
+
+        capacities = {}
+        for account in accounts:
+            aid = int(account["id"])
+            active = self.db.fetchone(
+                "SELECT COUNT(*) c FROM campaign_recipients "
+                "WHERE assigned_account_id=? "
+                "AND status NOT IN ('MESSAGE_SENT','FAILED','FAILED_FINAL')",
+                (aid,),
+            )
+            active_count = int(active["c"] or 0) if active else 0
+            capacities[aid] = max(0, max_per - active_count)
+
+        total_capacity = sum(capacities.values())
+        if total_capacity <= 0:
+            raise RuntimeError(
+                "체크한 계정에 남은 DB 배정 용량이 없습니다. "
+                "계정별 최대 처리량을 확인해주세요."
+            )
+
+        recipients = self.db.fetchall(
+            "SELECT * FROM recipients "
+            "WHERE status IN ('PENDING','REASSIGN_WAITING') "
+            "AND status!='MESSAGE_SENT' "
+            "ORDER BY "
+            "CASE WHEN status='REASSIGN_WAITING' THEN 0 ELSE 1 END,"
+            "id "
+            "LIMIT ?",
+            (total_capacity,),
+        )
+
+        if not recipients:
+            raise RuntimeError(
+                "현재 배정 가능한 대기 DB가 없습니다. "
+                "PENDING 또는 재배정 대기 DB만 수동 배정할 수 있습니다."
+            )
+
+        assignments = []
+        account_cycle = [int(a["id"]) for a in accounts]
+
+        # 한 계정부터 꽉 채우지 않고 체크한 계정에 순환 배정한다.
+        while recipients:
+            progressed = False
+            for aid in account_cycle:
+                if not recipients:
+                    break
+                if capacities.get(aid, 0) <= 0:
+                    continue
+
+                recipient = recipients.pop(0)
+                assignments.append((recipient, aid))
+                capacities[aid] -= 1
+                progressed = True
+
+            if not progressed:
+                break
+
+        if not assignments:
+            raise RuntimeError("배정 가능한 DB가 없습니다.")
+
+        campaign_id = self.db.execute(
+            "INSERT INTO campaigns(name,postbot_username,post_code,status,total_count) "
+            "VALUES(?,?,?,'CONTACT_WAITING',?)",
+            (name, bot_username, post_code, len(assignments)),
+        )
+
+        per_account = {}
+
+        with self.db.connection() as conn:
+            for recipient, account_id in assignments:
+                recipient_id = int(recipient["id"])
+                old_status = str(recipient["status"] or "")
+                from_account_id = recipient["handoff_from_account_id"]
+
+                conn.execute(
+                    "INSERT INTO campaign_recipients("
+                    "campaign_id,recipient_id,assigned_account_id,status,contact_status,"
+                    "error_code,error_message,telegram_message_id"
+                    ") VALUES(?,?,?,'ASSIGNED','WAITING',NULL,NULL,NULL)",
+                    (campaign_id, recipient_id, account_id),
+                )
+
+                conn.execute(
+                    "UPDATE recipients SET "
+                    "assigned_account_id=?,status='ASSIGNED',contact_status='NOT_ADDED',"
+                    "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                    "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                    "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                    "handoff_status=CASE WHEN ?='REASSIGN_WAITING' THEN 'ASSIGNED' ELSE handoff_status END,"
+                    "handoff_count=CASE WHEN ?='REASSIGN_WAITING' THEN handoff_count+1 ELSE handoff_count END,"
+                    "updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status IN ('PENDING','REASSIGN_WAITING')",
+                    (
+                        account_id,
+                        old_status,
+                        old_status,
+                        recipient_id,
+                    ),
+                )
+
+                conn.execute(
+                    "INSERT INTO assignment_history("
+                    "recipient_id,source_campaign_id,target_campaign_id,"
+                    "from_account_id,to_account_id,event_type,reason_code,reason_message"
+                    ") VALUES(?,?,?,?,?,'MANUAL_PREASSIGN',?,?)",
+                    (
+                        recipient_id,
+                        recipient["handoff_source_campaign_id"],
+                        campaign_id,
+                        from_account_id,
+                        account_id,
+                        old_status,
+                        "연락처 추가 전 체크 계정 수동 배정",
+                    ),
+                )
+
+                per_account[account_id] = per_account.get(account_id, 0) + 1
+
+        self.logs.write(
+            "INFO",
+            "배정",
+            f"수동 DB 배정 작업 #{campaign_id} 생성 / "
+            f"대상 {len(assignments)}명 / 체크 계정 {len(accounts)}개 / "
+            f"사용불가 제외 {excluded}개",
+            campaign_id=campaign_id,
+        )
+
+        return {
+            "campaign_id": campaign_id,
+            "assigned": len(assignments),
+            "account_count": len(accounts),
+            "excluded_accounts": excluded,
+            "per_account": per_account,
+        }
+
     def create_campaign(self, name, bot_username, post_code):
         accounts = self._accounts()
         recipients = self._pending()
