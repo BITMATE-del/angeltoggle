@@ -9,6 +9,7 @@ from app.services.db_import_service import DBImportService
 from app.services.session_service import SessionService
 from app.services.send_engine import SendEngine
 from app.services.update_service import UpdateService
+from app.services.completion_export_service import CompletionExportService
 from app.ui.chat_viewer import ChatViewerDialog
 
 
@@ -129,6 +130,7 @@ class MainWindow(QMainWindow):
         self.session_import = SessionService(db, logs)
         self.send_engine = SendEngine(db, logs)
         self.update_service = UpdateService(logs)
+        self.completion_export = CompletionExportService(db, logs)
         self.license_info = license_info or {}
 
         self.bridge = 신호브리지()
@@ -515,6 +517,7 @@ class MainWindow(QMainWindow):
         self.refresh_summary()
         self.refresh_work_status()
         self.refresh_accounts()
+        self.refresh_completion_log()
 
         if kind == "연락처":
             QMessageBox.information(
@@ -834,14 +837,118 @@ class MainWindow(QMainWindow):
     def log_page(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(self.title("실시간 작업 로그", "C:\\엔젤토글> 작업 로그 실시간 표시"))
+        l.addWidget(self.title("작업 로그", "C:\\엔젤토글> 실시간 로그 + 작업완료 DB"))
+
+        live_group = QGroupBox("실시간 작업 로그")
+        live_layout = QVBoxLayout(live_group)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Consolas", 10))
+        self.log_view.setMaximumHeight(220)
         self.log_view.setPlainText("[대기] 작업 로그가 이곳에 표시됩니다.")
-        l.addWidget(self.log_view)
+        live_layout.addWidget(self.log_view)
+        l.addWidget(live_group)
+
+        complete_group = QGroupBox("작업완료 로그")
+        complete_layout = QVBoxLayout(complete_group)
+
+        top = QHBoxLayout()
+        self.completion_label = QLabel("완료된 작업이 없습니다.")
+        self.completion_label.setObjectName("보조")
+
+        refresh = QPushButton("[ 작업완료 로그 새로고침 ]")
+        refresh.clicked.connect(self.refresh_completion_log)
+
+        export = QPushButton("[ 작업완료 DB Excel 다운로드 ]")
+        export.clicked.connect(self.export_completion_db)
+
+        top.addWidget(self.completion_label, 1)
+        top.addWidget(refresh)
+        top.addWidget(export)
+        complete_layout.addLayout(top)
+
+        self.completion_table = QTableWidget(0, 7)
+        self.completion_table.setHorizontalHeaderLabels([
+            "DB",
+            "전화번호",
+            "연락처",
+            "연락처 추가",
+            "메시지 전송",
+            "성공시간",
+            "PostBot 고유번호",
+        ])
+        self.completion_table.horizontalHeader().setStretchLastSection(True)
+        self.completion_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.completion_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        complete_layout.addWidget(self.completion_table)
+
+        l.addWidget(complete_group, 1)
+
+        QTimer.singleShot(0, self.refresh_completion_log)
         return w
+
+    def refresh_completion_log(self):
+        if not hasattr(self, "completion_table"):
+            return
+
+        campaign = self.send_engine.latest_campaign()
+        if not campaign:
+            self.completion_label.setText("완료된 작업이 없습니다.")
+            self.completion_table.setRowCount(0)
+            return
+
+        rows = self.completion_export.completion_rows(campaign["id"])
+        self.completion_label.setText(
+            f"작업 #{campaign['id']} / 상태 {campaign['status']} / 대상 {campaign['total_count']}명"
+        )
+        self.completion_table.setRowCount(len(rows))
+
+        for idx, row in enumerate(rows):
+            values = [
+                row["db_no"],
+                row["phone"],
+                row["contact_name"],
+                row["contact_status"],
+                row["send_status"],
+                row["send_time"] or row["contact_time"],
+                row["postbot_code"],
+            ]
+
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value or ""))
+                self.completion_table.setItem(idx, col, item)
+
+        self.completion_table.resizeColumnsToContents()
+
+    def export_completion_db(self):
+        campaign = self.send_engine.latest_campaign()
+        if not campaign:
+            QMessageBox.information(self, "작업완료 DB", "다운로드할 작업이 없습니다.")
+            return
+
+        default_name = f"AngelToggle_작업완료_{campaign['id']}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "작업완료 DB 저장",
+            default_name,
+            "Excel (*.xlsx)"
+        )
+        if not path:
+            return
+
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        try:
+            saved = self.completion_export.export_xlsx(campaign["id"], path)
+            QMessageBox.information(
+                self,
+                "다운로드 완료",
+                f"작업완료 DB를 저장했습니다.\n\n{saved}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "작업완료 DB 오류", str(e))
 
     def append_log(self, item):
         if not hasattr(self, "log_view"):
