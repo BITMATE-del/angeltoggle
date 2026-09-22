@@ -50,8 +50,7 @@ jobs:
           $root = "dist\AngelToggle"
           $required = @(
             "_internal\PySide6\QtWidgets.pyd",
-            "_internal\PySide6\Qt\bin\Qt6Widgets.dll",
-            "_internal\PySide6\Qt\plugins\platforms\qwindows.dll"
+            "_internal\PySide6\plugins\platforms\qwindows.dll"
           )
           foreach ($rel in $required) {
             $p = Join-Path $root $rel
