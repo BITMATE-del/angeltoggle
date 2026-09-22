@@ -147,6 +147,8 @@ class LicenseService:
                 "grace_hours": data.get("grace_hours", 72),
                 "last_verified_at": data.get("server_time") or _utcnow().isoformat(),
                 "minimum_client_version": data.get("minimum_client_version"),
+                "point_balance_krw": data.get("point_balance_krw", 0),
+                "send_unit_price_krw": data.get("send_unit_price_krw", 10),
             }
             self.save_state(state)
             if self.logs:
