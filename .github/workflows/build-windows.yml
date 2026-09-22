@@ -1,4 +1,4 @@
-name: Build AngelToggle Windows EXE
+name: Build AngelToggle Windows Installer
 
 on:
   push:
@@ -38,77 +38,58 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
-      - name: Build stable onedir application
+      - name: Build stable application folder
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onedir --windowed --name "AngelToggle" --hidden-import pyexpat --collect-submodules xml --collect-all PySide6 --collect-all shiboken6 main.py
-          if (-not (Test-Path dist\AngelToggle\AngelToggle.exe)) { throw "AngelToggle.exe missing from app build" }
+          if (-not (Test-Path dist\AngelToggle\AngelToggle.exe)) { throw "AngelToggle.exe missing" }
+          $expat = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter pyexpat.pyd | Select-Object -First 1
+          if (-not $expat) { throw "pyexpat.pyd missing" }
+          $qtwidgets = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter QtWidgets.pyd | Select-Object -First 1
+          if (-not $qtwidgets) { throw "QtWidgets.pyd missing" }
+          $qwindows = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter qwindows.dll | Select-Object -First 1
+          if (-not $qwindows) { throw "qwindows.dll missing" }
 
-      - name: Verify Qt runtime files
-        shell: pwsh
-        run: |
-          $root = "dist\AngelToggle"
-          $required = @(
-            "_internal\PySide6\QtWidgets.pyd",
-            "_internal\PySide6\plugins\platforms\qwindows.dll"
-          )
-          foreach ($rel in $required) {
-            $p = Join-Path $root $rel
-            if (-not (Test-Path $p)) {
-              Write-Host "Expected path missing: $p"
-              Get-ChildItem -Path $root -Recurse -Filter "*QtWidgets*" | ForEach-Object { Write-Host $_.FullName }
-              Get-ChildItem -Path $root -Recurse -Filter "qwindows.dll" | ForEach-Object { Write-Host $_.FullName }
-              throw "Required Qt runtime file missing: $rel"
-            }
-          }
-          $expat = Get-ChildItem -Path $root -Recurse -Filter pyexpat.pyd | Select-Object -First 1
-          if (-not $expat) { throw "pyexpat.pyd missing from onedir build" }
-
-      - name: Add Microsoft VC runtime installer
+      - name: Add Microsoft VC runtime
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "dist\AngelToggle\vc_redist.x64.exe"
           if ((Get-Item "dist\AngelToggle\vc_redist.x64.exe").Length -lt 1000000) { throw "VC redistributable download failed" }
 
-      - name: Smoke test onedir application
+      - name: Smoke test application
         shell: pwsh
         run: |
           $p = Start-Process -FilePath ".\dist\AngelToggle\AngelToggle.exe" -WorkingDirectory ".\dist\AngelToggle" -PassThru
           Start-Sleep -Seconds 10
-          if ($p.HasExited) { throw "AngelToggle app exited during smoke test. ExitCode=$($p.ExitCode)" }
+          if ($p.HasExited) { throw "AngelToggle exited during smoke test. ExitCode=$($p.ExitCode)" }
           Stop-Process -Id $p.Id -Force
 
-      - name: Build native backwards-compatible launcher
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer wizard
         shell: pwsh
         run: |
-          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          if (-not (Test-Path $csc)) { throw "C# compiler not found: $csc" }
-          & $csc /nologo /target:winexe /optimize+ /out:dist\AngelToggleLauncher.exe /reference:System.Windows.Forms.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll bootstrap_updater.cs
-          if ($LASTEXITCODE -ne 0) { throw "Native launcher compile failed" }
-          if (-not (Test-Path dist\AngelToggleLauncher.exe)) { throw "Native launcher missing" }
+          New-Item -ItemType Directory -Force -Path installer_output | Out-Null
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found" }
+          & $iscc "/DMyAppVersion=$env:APP_VERSION" installer\AngelToggle.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
+          if (-not (Test-Path installer_output\AngelToggle-Setup.exe)) { throw "AngelToggle-Setup.exe missing" }
 
-      - name: Create release files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path release | Out-Null
-          Copy-Item dist\AngelToggle release\AngelToggle -Recurse
-          Compress-Archive -Path release\AngelToggle -DestinationPath AngelToggle-Windows.zip -Force
-          Copy-Item dist\AngelToggleLauncher.exe release\AngelToggle.exe
-
-      - name: Upload build artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AngelToggle-Windows
-          path: |
-            release/AngelToggle.exe
-            AngelToggle-Windows.zip
+          name: AngelToggle-Setup
+          path: installer_output/AngelToggle-Setup.exe
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish update release
+      - name: Publish installer release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v" + $env:APP_VERSION
-          gh release create $tag release\AngelToggle.exe AngelToggle-Windows.zip --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Native launcher plus Qt-complete package with Microsoft VC runtime bootstrap"
+          gh release create $tag installer_output\AngelToggle-Setup.exe --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Windows installer wizard release"
