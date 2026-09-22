@@ -2,12 +2,14 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .telegram_service import TelegramService, RecipientError, AccountWorkerError
+from .point_service import PointService, PointError
 
 class SendEngine:
     def __init__(self, db, logs):
         self.db = db
         self.logs = logs
         self.telegram = TelegramService(db, logs)
+        self.points = PointService(logs)
         self._uid_lock = threading.Lock()
 
     def _accounts(self):
@@ -566,6 +568,27 @@ class SendEngine:
                     )
 
                 except AccountWorkerError as e:
+                    if point_reserved:
+                        try:
+                            refund = self.points.cancel_send(message_key, str(e))
+                            self.logs.write(
+                                "INFO",
+                                "포인트",
+                                f"계정 오류 발송취소 환불 +10원 / 잔액 {int(refund.get('point_balance_krw') or 0):,}원",
+                                account_id=account_id,
+                                campaign_id=campaign_id,
+                                recipient_id=recipient_id,
+                            )
+                        except Exception as refund_error:
+                            self.logs.write(
+                                "WARNING",
+                                "포인트",
+                                f"계정 오류 포인트 환불 확인 실패: {refund_error}",
+                                account_id=account_id,
+                                campaign_id=campaign_id,
+                                recipient_id=recipient_id,
+                            )
+
                     self.db.execute(
                         f"UPDATE campaign_recipients SET contact_status='CONTACT_PAUSED',"
                         f"error_code=?,error_message=?,updated_at=CURRENT_TIMESTAMP "
@@ -631,6 +654,29 @@ class SendEngine:
         )["c"]
         if not ready:
             raise RuntimeError("게시물을 발송할 연락처가 없습니다.")
+
+        try:
+            point = self.points.balance()
+        except PointError as e:
+            raise RuntimeError(f"발송 포인트 확인 실패: {e}") from e
+
+        unit_price = int(point["unit_price_krw"] or 10)
+        required_points = int(ready) * unit_price
+        current_points = int(point["balance_krw"] or 0)
+
+        if current_points < required_points:
+            raise RuntimeError(
+                f"발송 포인트가 부족합니다. 현재 {current_points:,}원 / "
+                f"필요 {required_points:,}원 ({ready}건 × {unit_price}원)"
+            )
+
+        self.logs.write(
+            "INFO",
+            "포인트",
+            f"발송 포인트 확인 / 현재 {current_points:,}원 / "
+            f"예상 사용 {required_points:,}원 / 건당 {unit_price}원",
+            campaign_id=campaign_id,
+        )
 
         self.db.execute(
             "UPDATE campaigns SET status='SEND_RUNNING',started_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -782,7 +828,35 @@ class SendEngine:
                 if claimed != 1:
                     continue
 
+                message_key = f"{campaign_id}:{recipient_id}"
+                account_key = str(account["id"])
+                account_label = (
+                    account["phone"]
+                    or account["username"]
+                    or account["name"]
+                    or f"계정-{account_id}"
+                )
+                point_reserved = False
+
                 try:
+                    reserve = self.points.reserve_send(
+                        message_key=message_key,
+                        telegram_account_key=account_key,
+                        telegram_account_label=account_label,
+                        campaign_id=campaign_id,
+                        recipient_id=recipient_id,
+                    )
+                    point_reserved = True
+
+                    self.logs.write(
+                        "INFO",
+                        "포인트",
+                        f"발송 10원 예약 / 잔액 {int(reserve.get('point_balance_krw') or 0):,}원",
+                        account_id=account_id,
+                        campaign_id=campaign_id,
+                        recipient_id=recipient_id,
+                    )
+
                     peer = int(uid)
 
                     self.logs.write(
@@ -802,6 +876,31 @@ class SendEngine:
                     )
                     message_id = sent["message_id"]
                     postbot_code = sent["post_code"]
+
+                    try:
+                        confirmed = self.points.confirm_send(
+                            message_key=message_key,
+                            telegram_message_id=message_id,
+                        )
+                        self.logs.write(
+                            "SUCCESS",
+                            "포인트",
+                            f"발송 확정 · 10원 사용 / 잔액 {int(confirmed.get('point_balance_krw') or 0):,}원",
+                            account_id=account_id,
+                            campaign_id=campaign_id,
+                            recipient_id=recipient_id,
+                        )
+                    except PointError as e:
+                        # Telegram message_id가 이미 확인된 뒤에는 중복발송 방지를 위해
+                        # MESSAGE_SENT 처리를 유지한다. 예약된 10원은 이미 서버에서 차감되어 있다.
+                        self.logs.write(
+                            "WARNING",
+                            "포인트",
+                            f"발송 성공 후 포인트 확정 응답 확인 실패: {e}",
+                            account_id=account_id,
+                            campaign_id=campaign_id,
+                            recipient_id=recipient_id,
+                        )
 
                     with self.db.connection() as conn:
                         conn.execute(
@@ -838,7 +937,60 @@ class SendEngine:
                         recipient_id=recipient_id,
                     )
 
+                except PointError as e:
+                    if point_reserved:
+                        try:
+                            self.points.cancel_send(message_key, str(e))
+                        except Exception:
+                            pass
+
+                    code = e.code or "POINT_ERROR"
+                    with self.db.connection() as conn:
+                        conn.execute(
+                            "UPDATE campaign_recipients SET status='SEND_PAUSED',"
+                            "error_code=?,error_message=?,updated_at=CURRENT_TIMESTAMP "
+                            "WHERE campaign_id=? AND recipient_id=?",
+                            (code, str(e), campaign_id, recipient_id),
+                        )
+                        conn.execute(
+                            "UPDATE recipients SET status='ASSIGNED',"
+                            "error_code=?,error_message=?,updated_at=CURRENT_TIMESTAMP "
+                            "WHERE id=?",
+                            (code, str(e), recipient_id),
+                        )
+
+                    self.logs.write(
+                        "ERROR",
+                        "포인트",
+                        f"{code}: {e}",
+                        account_id=account_id,
+                        campaign_id=campaign_id,
+                        recipient_id=recipient_id,
+                    )
+                    break
+
                 except RecipientError as e:
+                    if point_reserved:
+                        try:
+                            refund = self.points.cancel_send(message_key, str(e))
+                            self.logs.write(
+                                "INFO",
+                                "포인트",
+                                f"발송 실패 환불 +10원 / 잔액 {int(refund.get('point_balance_krw') or 0):,}원",
+                                account_id=account_id,
+                                campaign_id=campaign_id,
+                                recipient_id=recipient_id,
+                            )
+                        except Exception as refund_error:
+                            self.logs.write(
+                                "WARNING",
+                                "포인트",
+                                f"발송 실패 포인트 환불 확인 실패: {refund_error}",
+                                account_id=account_id,
+                                campaign_id=campaign_id,
+                                recipient_id=recipient_id,
+                            )
+
                     with self.db.connection() as conn:
                         conn.execute(
                             "UPDATE campaign_recipients SET status='FAILED',"
