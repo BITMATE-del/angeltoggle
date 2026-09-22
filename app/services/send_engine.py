@@ -12,7 +12,73 @@ class SendEngine:
         self.points = PointService(logs)
         self._uid_lock = threading.Lock()
 
+    def sector_count(self):
+        configured = int(self.db.get_setting("worker_sector_count", "1") or 1)
+        return max(1, configured)
+
+    def rebalance_account_sectors(self):
+        accounts = self.db.fetchall(
+            "SELECT id FROM telegram_accounts ORDER BY id"
+        )
+        if not accounts:
+            return {"sectors": self.sector_count(), "accounts": 0}
+
+        required = max(1, (len(accounts) + 9) // 10)
+        configured = max(self.sector_count(), required)
+        if configured != self.sector_count():
+            self.db.set_setting("worker_sector_count", configured)
+
+        with self.db.connection() as conn:
+            for idx, account in enumerate(accounts):
+                sector = (idx // 10) + 1
+                conn.execute(
+                    "UPDATE telegram_accounts SET worker_sector=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (sector, account["id"]),
+                )
+
+        return {"sectors": configured, "accounts": len(accounts)}
+
+    def add_sector(self):
+        current = self.sector_count()
+        self.db.set_setting("worker_sector_count", current + 1)
+        self.rebalance_account_sectors()
+        return current + 1
+
+    def remove_last_sector(self):
+        current = self.sector_count()
+        if current <= 1:
+            raise RuntimeError("진행창은 최소 1개가 필요합니다.")
+
+        target = current
+        target_count = self.db.fetchone(
+            "SELECT COUNT(*) c FROM telegram_accounts WHERE worker_sector=?",
+            (target,),
+        )["c"]
+
+        remaining_capacity = (current - 1) * 10
+        total_accounts = self.db.fetchone(
+            "SELECT COUNT(*) c FROM telegram_accounts"
+        )["c"]
+
+        if total_accounts > remaining_capacity:
+            raise RuntimeError(
+                f"진행창 {target}을 삭제할 수 없습니다. "
+                f"계정 {target_count}개를 옮길 빈 자리가 부족합니다."
+            )
+
+        self.db.set_setting("worker_sector_count", current - 1)
+        self.rebalance_account_sectors()
+        return current - 1
+
+    def _group_accounts_by_sector(self, account_rows):
+        groups = {}
+        for account in account_rows:
+            sector = int(account["worker_sector"] or 1)
+            groups.setdefault(sector, []).append(account)
+        return groups
+
     def _accounts(self):
+        self.rebalance_account_sectors()
         return self.db.fetchall(
             "SELECT * FROM telegram_accounts WHERE enabled=1 "
             "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED') "
@@ -389,21 +455,35 @@ class SendEngine:
         )
 
         if account_rows:
+            sector_groups = self._group_accounts_by_sector(account_rows)
+            self.logs.write(
+                "INFO",
+                "병렬",
+                f"연락처 작업 병렬 실행 / 진행창 {len(sector_groups)}개 / 진행창당 최대 계정 10개",
+                campaign_id=campaign_id,
+            )
+
             with ThreadPoolExecutor(
-                max_workers=len(account_rows),
-                thread_name_prefix="AngelToggleContact"
-            ) as pool:
+                max_workers=max(1, len(sector_groups)),
+                thread_name_prefix="AngelToggleContactSector"
+            ) as sector_pool:
                 futures = [
-                    pool.submit(self._contact_thread, campaign_id, account["id"])
-                    for account in account_rows
+                    sector_pool.submit(
+                        self._run_contact_sector,
+                        campaign_id,
+                        sector_id,
+                        accounts,
+                    )
+                    for sector_id, accounts in sorted(sector_groups.items())
                 ]
                 for future in as_completed(futures):
                     try:
                         future.result()
                     except Exception as e:
                         self.logs.write(
-                            "ERROR", "연락처",
-                            f"연락처 작업 오류: {type(e).__name__}: {e}",
+                            "ERROR",
+                            "연락처",
+                            f"진행창 Worker 오류: {type(e).__name__}: {e}",
                             campaign_id=campaign_id,
                         )
 
@@ -431,6 +511,41 @@ class SendEngine:
         )
         self._sync_retry_history(campaign_id)
         return {"ready": ready, "failed": failed, "paused": paused}
+
+    def _run_contact_sector(self, campaign_id, sector_id, accounts):
+        limited = list(accounts)[:10]
+        self.logs.write(
+            "INFO",
+            "진행창",
+            f"진행창 {sector_id} 시작 / 계정 {len(limited)}개 병렬",
+            campaign_id=campaign_id,
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(limited)),
+            thread_name_prefix=f"AngelToggleContactS{sector_id}"
+        ) as pool:
+            futures = [
+                pool.submit(self._contact_thread, campaign_id, account["id"])
+                for account in limited
+            ]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logs.write(
+                        "ERROR",
+                        "진행창",
+                        f"진행창 {sector_id} 계정 Worker 오류 격리: {type(e).__name__}: {e}",
+                        campaign_id=campaign_id,
+                    )
+
+        self.logs.write(
+            "INFO",
+            "진행창",
+            f"진행창 {sector_id} 연락처 단계 종료",
+            campaign_id=campaign_id,
+        )
 
     def _contact_thread(self, campaign_id, account_id):
         try:
@@ -688,21 +803,35 @@ class SendEngine:
             campaign_id=campaign_id,
         )
 
+        sector_groups = self._group_accounts_by_sector(account_rows)
+        self.logs.write(
+            "INFO",
+            "병렬",
+            f"발송 병렬 실행 / 진행창 {len(sector_groups)}개 / 진행창당 최대 계정 10개",
+            campaign_id=campaign_id,
+        )
+
         with ThreadPoolExecutor(
-            max_workers=max(1, len(account_rows)),
-            thread_name_prefix="AngelToggleSend"
-        ) as pool:
+            max_workers=max(1, len(sector_groups)),
+            thread_name_prefix="AngelToggleSendSector"
+        ) as sector_pool:
             futures = [
-                pool.submit(self._send_thread, campaign_id, account["id"])
-                for account in account_rows
+                sector_pool.submit(
+                    self._run_send_sector,
+                    campaign_id,
+                    sector_id,
+                    accounts,
+                )
+                for sector_id, accounts in sorted(sector_groups.items())
             ]
             for future in as_completed(futures):
                 try:
                     future.result()
                 except Exception as e:
                     self.logs.write(
-                        "ERROR", "발송",
-                        f"발송 Worker 오류: {type(e).__name__}: {e}",
+                        "ERROR",
+                        "발송",
+                        f"진행창 Worker 오류: {type(e).__name__}: {e}",
                         campaign_id=campaign_id,
                     )
 
@@ -730,6 +859,41 @@ class SendEngine:
         )
         self._sync_retry_history(campaign_id)
         return {"success": success, "failed": failed, "remaining": remaining}
+
+    def _run_send_sector(self, campaign_id, sector_id, accounts):
+        limited = list(accounts)[:10]
+        self.logs.write(
+            "INFO",
+            "진행창",
+            f"진행창 {sector_id} 발송 시작 / 계정 {len(limited)}개 병렬",
+            campaign_id=campaign_id,
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(limited)),
+            thread_name_prefix=f"AngelToggleSendS{sector_id}"
+        ) as pool:
+            futures = [
+                pool.submit(self._send_thread, campaign_id, account["id"])
+                for account in limited
+            ]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logs.write(
+                        "ERROR",
+                        "진행창",
+                        f"진행창 {sector_id} 계정 Worker 오류 격리: {type(e).__name__}: {e}",
+                        campaign_id=campaign_id,
+                    )
+
+        self.logs.write(
+            "INFO",
+            "진행창",
+            f"진행창 {sector_id} 발송 단계 종료",
+            campaign_id=campaign_id,
+        )
 
     def _send_thread(self, campaign_id, account_id):
         try:
