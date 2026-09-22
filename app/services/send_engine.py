@@ -1072,9 +1072,9 @@ class SendEngine:
 
         stats = self.db.fetchone(
             "SELECT "
-            "SUM(CASE WHEN contact_status='ADDED' THEN 1 ELSE 0 END) ready, "
-            "SUM(CASE WHEN contact_status='FAILED' THEN 1 ELSE 0 END) failed, "
-            "SUM(CASE WHEN contact_status IN ('WAITING','ADDING','CONTACT_PAUSED','CONTACT_UNCERTAIN') THEN 1 ELSE 0 END) paused "
+            "SUM(CASE WHEN campaign_recipients.contact_status='ADDED' THEN 1 ELSE 0 END) ready, "
+            "SUM(CASE WHEN campaign_recipients.contact_status='FAILED' THEN 1 ELSE 0 END) failed, "
+            "SUM(CASE WHEN campaign_recipients.contact_status IN ('WAITING','ADDING','CONTACT_PAUSED','CONTACT_UNCERTAIN') THEN 1 ELSE 0 END) paused "
             "FROM campaign_recipients WHERE campaign_id=?",
             (campaign_id,),
         )
