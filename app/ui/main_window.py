@@ -707,31 +707,54 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def import_sessions(self):
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "텔레그램 세션 파일 선택",
+            "텔레그램 세션 파일 여러 개 선택",
             "",
             "텔레그램 세션 (*.zip *.session);;ZIP 압축 (*.zip);;SESSION 파일 (*.session)"
         )
-        if not path:
+        if not paths:
             return
 
+        total = {
+            "found": 0,
+            "imported": 0,
+            "renamed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
         try:
-            if path.lower().endswith(".session"):
-                s = self.session_import.import_session_file(path)
-            else:
-                s = self.session_import.import_zip(path)
+            for path in paths:
+                try:
+                    if path.lower().endswith(".session"):
+                        s = self.session_import.import_session_file(path)
+                    else:
+                        s = self.session_import.import_zip(path)
+
+                    for key in total:
+                        total[key] += int(s.get(key, 0) or 0)
+
+                except Exception as e:
+                    total["failed"] += 1
+                    self.logs.write(
+                        "ERROR",
+                        "ACCOUNT",
+                        f"세션 파일 등록 실패: {path} / {type(e).__name__}: {e}",
+                    )
 
             QMessageBox.information(
                 self,
-                "세션 등록 완료",
-                f"발견: {s.get('found', 0)}개\n"
-                f"등록: {s.get('imported', 0)}개\n"
-                f"동일 이름 자동변경: {s.get('renamed', 0)}개\n"
-                f"실패: {s.get('failed', 0)}개"
+                "세션 일괄등록 완료",
+                f"선택 파일: {len(paths)}개\n"
+                f"발견: {total['found']}개\n"
+                f"등록: {total['imported']}개\n"
+                f"동일 이름 자동변경: {total['renamed']}개\n"
+                f"실패: {total['failed']}개"
             )
             self.refresh_accounts()
             self.refresh_summary()
+
         except Exception as e:
             QMessageBox.critical(self, "세션 등록 오류", str(e))
 
