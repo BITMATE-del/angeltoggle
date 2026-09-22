@@ -673,6 +673,88 @@ class SendEngine:
             account_id=account_id, campaign_id=campaign_id,
         )
 
+    def cancel_active_assignments(self, account_ids=None, campaign_id=None):
+        account_ids = [int(x) for x in (account_ids or [])]
+        where = [
+            "cr.status != 'MESSAGE_SENT'",
+            "r.status != 'MESSAGE_SENT'",
+        ]
+        params = []
+
+        if account_ids:
+            marks = ",".join("?" for _ in account_ids)
+            where.append(f"cr.assigned_account_id IN ({marks})")
+            params.extend(account_ids)
+
+        if campaign_id is not None:
+            where.append("cr.campaign_id=?")
+            params.append(int(campaign_id))
+
+        sql_where = " AND ".join(where)
+
+        rows = self.db.fetchall(
+            "SELECT cr.campaign_id,cr.recipient_id,cr.assigned_account_id "
+            "FROM campaign_recipients cr "
+            "JOIN recipients r ON r.id=cr.recipient_id "
+            f"WHERE {sql_where}",
+            tuple(params),
+        )
+
+        if not rows:
+            return 0
+
+        recipient_ids = [int(row["recipient_id"]) for row in rows]
+        campaign_ids = sorted({int(row["campaign_id"]) for row in rows})
+
+        with self.db.connection() as conn:
+            for row in rows:
+                conn.execute(
+                    "DELETE FROM campaign_recipients "
+                    "WHERE campaign_id=? AND recipient_id=? AND status!='MESSAGE_SENT'",
+                    (row["campaign_id"], row["recipient_id"]),
+                )
+                conn.execute(
+                    "UPDATE recipients SET "
+                    "assigned_account_id=NULL,status='PENDING',contact_status='NOT_ADDED',"
+                    "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                    "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                    "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                    "updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status!='MESSAGE_SENT'",
+                    (row["recipient_id"],),
+                )
+
+            for cid in campaign_ids:
+                remaining = conn.execute(
+                    "SELECT COUNT(*) c FROM campaign_recipients WHERE campaign_id=?",
+                    (cid,),
+                ).fetchone()["c"]
+                sent = conn.execute(
+                    "SELECT COUNT(*) c FROM campaign_recipients "
+                    "WHERE campaign_id=? AND status='MESSAGE_SENT'",
+                    (cid,),
+                ).fetchone()["c"]
+
+                if remaining == 0:
+                    new_status = "CANCELLED"
+                elif sent == remaining:
+                    new_status = "COMPLETED"
+                else:
+                    new_status = "PARTIAL"
+
+                conn.execute(
+                    "UPDATE campaigns SET total_count=?,status=? "
+                    "WHERE id=?",
+                    (remaining, new_status, cid),
+                )
+
+        self.logs.write(
+            "INFO",
+            "배정",
+            f"진행 중 배정 {len(rows)}건 취소 / 고객 DB를 대기상태로 복구",
+        )
+        return len(rows)
+
     def latest_campaign(self):
         return self.db.fetchone("SELECT * FROM campaigns ORDER BY id DESC LIMIT 1")
 
