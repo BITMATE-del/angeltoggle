@@ -161,6 +161,43 @@ class TelegramService:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("CONTACT_LIST_FAILED", name)
 
+    async def check_postbot(self, client, bot_username, post_value):
+        bot_username = (bot_username or "@PostBot").strip()
+        if not bot_username.startswith("@"):
+            bot_username = "@" + bot_username
+
+        post_code = normalize_post_code(post_value)
+        if not post_code:
+            raise RecipientError("POSTBOT_INVALID_CODE", "PostBot 게시물 코드가 비어 있습니다.")
+
+        try:
+            results = await client.inline_query(bot_username, post_code)
+            if not results:
+                raise RecipientError("POSTBOT_RESULT_NOT_FOUND", "PostBot 인라인 결과가 없습니다.")
+
+            first = results[0]
+            title = getattr(first, "title", None) or getattr(first, "description", None) or "게시물 확인됨"
+            return {
+                "ok": True,
+                "post_code": post_code,
+                "result_count": len(results),
+                "title": str(title),
+            }
+
+        except RecipientError:
+            raise
+        except errors.FloodWaitError as e:
+            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
+        except errors.PeerFloodError as e:
+            raise AccountWorkerError("PEER_FLOOD", str(e))
+        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
+            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
+        except Exception as e:
+            name = type(e).__name__
+            if "Flood" in name or "AuthKey" in name or "Session" in name:
+                raise AccountWorkerError("ACCOUNT_ERROR", name)
+            raise RecipientError("POSTBOT_CHECK_FAILED", name)
+
     async def prepare_postbot_source(self, client, bot_username, post_value):
         bot_username = (bot_username or "@PostBot").strip()
         if not bot_username.startswith("@"):
