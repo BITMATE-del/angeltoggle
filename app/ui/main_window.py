@@ -119,6 +119,29 @@ QFrame#콘솔패널 {
     border: 1px solid #173A27;
     border-radius: 10px;
 }
+QTabWidget::pane {
+    border: 1px solid #1C5A33;
+    background-color: #050706;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #0A160F;
+    color: #8EF7AA;
+    border: 1px solid #1C5A33;
+    padding: 9px 14px;
+    margin-right: 2px;
+    min-width: 92px;
+    font-weight: 800;
+}
+QTabBar::tab:selected {
+    background-color: #12361F;
+    color: #FFFFFF;
+    border-color: #2CE66D;
+}
+QTabBar::tab:hover {
+    background-color: #0F2A19;
+    color: #FFFFFF;
+}
 QLabel#진행카드 {
     background-color: #07100B;
     border: 1px solid #1C5A33;
@@ -234,6 +257,7 @@ class MainWindow(QMainWindow):
         self.progress_timer = QTimer(self)
         self.progress_timer.timeout.connect(self.refresh_live_progress)
         self.progress_timer.start(800)
+        QTimer.singleShot(0, self.refresh_progress_sectors)
 
     def _license_badge_text(self):
         remaining = self.license_info.get("remaining_days")
@@ -411,6 +435,30 @@ class MainWindow(QMainWindow):
         retry_row.addWidget(self.retry_history_label, 1)
         l.addLayout(retry_row)
 
+        sector_group = QGroupBox("병렬 진행창 관리")
+        sector_layout = QVBoxLayout(sector_group)
+
+        sector_top = QHBoxLayout()
+        self.sector_summary = QLabel("진행창 정보를 불러오는 중입니다.")
+        self.sector_summary.setObjectName("보조")
+
+        add_sector = QPushButton("[ 진행창 추가 ]")
+        add_sector.clicked.connect(self.add_progress_sector)
+
+        remove_sector = QPushButton("[ 마지막 진행창 삭제 ]")
+        remove_sector.clicked.connect(self.remove_progress_sector)
+
+        sector_top.addWidget(self.sector_summary, 1)
+        sector_top.addWidget(add_sector)
+        sector_top.addWidget(remove_sector)
+        sector_layout.addLayout(sector_top)
+
+        self.sector_tabs = QTabWidget()
+        self.sector_tabs.setMaximumHeight(150)
+        sector_layout.addWidget(self.sector_tabs)
+
+        l.addWidget(sector_group)
+
         live_group = QGroupBox("실시간 작업 진행 로그")
         live_layout = QVBoxLayout(live_group)
 
@@ -521,6 +569,128 @@ class MainWindow(QMainWindow):
         self.progress_points.setText(
             f"[포인트] 사용 {used_points:,}원 / 남은 예상 {expected_points:,}원"
         )
+
+        self.refresh_progress_sectors()
+
+    def refresh_progress_sectors(self):
+        if not hasattr(self, "sector_tabs"):
+            return
+
+        info = self.send_engine.rebalance_account_sectors()
+        sector_count = int(info.get("sectors", 1) or 1)
+        total_accounts = int(info.get("accounts", 0) or 0)
+
+        self.sector_summary.setText(
+            f"진행창 {sector_count}개 · 등록 계정 {total_accounts}개 · 진행창당 최대 10개 계정"
+        )
+
+        current_index = self.sector_tabs.currentIndex()
+        self.sector_tabs.clear()
+
+        campaign = None
+        if self.current_campaign_id:
+            campaign = self.db.fetchone(
+                "SELECT id FROM campaigns WHERE id=?",
+                (self.current_campaign_id,),
+            )
+        if not campaign:
+            campaign = self.send_engine.latest_campaign()
+        campaign_id = int(campaign["id"]) if campaign else None
+
+        for sector_id in range(1, sector_count + 1):
+            page = QWidget()
+            layout = QVBoxLayout(page)
+
+            accounts = self.db.fetchall(
+                "SELECT id,name,phone,status,last_error "
+                "FROM telegram_accounts WHERE worker_sector=? ORDER BY id",
+                (sector_id,),
+            )
+
+            working = 0
+            sent = 0
+            failed = 0
+            if campaign_id and accounts:
+                ids = [int(a["id"]) for a in accounts]
+                marks = ",".join("?" for _ in ids)
+                stats = self.db.fetchone(
+                    "SELECT "
+                    "SUM(CASE WHEN status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
+                    "OR contact_status IN ('WAITING','ADDING','CONTACT_PAUSED') THEN 1 ELSE 0 END) working,"
+                    "SUM(CASE WHEN status='MESSAGE_SENT' THEN 1 ELSE 0 END) sent,"
+                    "SUM(CASE WHEN status='FAILED' OR contact_status='FAILED' THEN 1 ELSE 0 END) failed "
+                    f"FROM campaign_recipients WHERE campaign_id=? "
+                    f"AND assigned_account_id IN ({marks})",
+                    (campaign_id, *ids),
+                )
+                if stats:
+                    working = int(stats["working"] or 0)
+                    sent = int(stats["sent"] or 0)
+                    failed = int(stats["failed"] or 0)
+
+            account_names = []
+            for account in accounts[:10]:
+                label = account["phone"] or account["name"] or f"계정-{account['id']}"
+                state = account["status"] or "UNKNOWN"
+                account_names.append(f"{label}({state})")
+
+            text = QLabel(
+                f"[계정] {len(accounts)}/10개   [진행] {working}   "
+                f"[성공] {sent}   [실패] {failed}\n"
+                + (" · ".join(account_names) if account_names else "배정된 계정 없음")
+            )
+            text.setWordWrap(True)
+            text.setObjectName("보조")
+            layout.addWidget(text)
+
+            self.sector_tabs.addTab(page, f"진행창 {sector_id} ({len(accounts)}/10)")
+
+        if self.sector_tabs.count():
+            self.sector_tabs.setCurrentIndex(
+                min(max(current_index, 0), self.sector_tabs.count() - 1)
+            )
+
+    def add_progress_sector(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "작업 중에는 진행창 구성을 변경할 수 없습니다."
+            )
+            return
+
+        try:
+            count = self.send_engine.add_sector()
+            self.refresh_progress_sectors()
+            self.refresh_accounts()
+            QMessageBox.information(
+                self,
+                "진행창 추가",
+                f"진행창 {count}개로 변경했습니다. 계정은 자동으로 균등 재배치됩니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "진행창 추가 오류", str(e))
+
+    def remove_progress_sector(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "작업 중에는 진행창 구성을 변경할 수 없습니다."
+            )
+            return
+
+        try:
+            count = self.send_engine.remove_last_sector()
+            self.refresh_progress_sectors()
+            self.refresh_accounts()
+            QMessageBox.information(
+                self,
+                "진행창 삭제",
+                f"진행창 {count}개로 변경했습니다. 계정은 자동으로 다시 배치됩니다."
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "진행창 삭제 불가", str(e))
 
     def clear_work_live_log(self):
         if hasattr(self, "work_live_log"):
@@ -781,7 +951,8 @@ class MainWindow(QMainWindow):
             f"실패 {failed_count}건만 다시 대기상태로 복구하고 "
             "정상 계정에 새로 재배정하여 전송하시겠습니까?\n\n"
             "기존 MESSAGE_SENT 성공건은 절대 다시 처리하지 않습니다.\n"
-            "실패건은 연락처 추가부터 다시 진행합니다.",
+            "이미 연락처 추가/UID 확인이 끝난 DB는 기존 담당 계정을 그대로 사용하고 "
+            "연락처 추가를 생략합니다.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -955,6 +1126,8 @@ class MainWindow(QMainWindow):
                 f"원본 작업: #{retry['source_campaign_id']}\n"
                 f"재시도 작업: #{retry['campaign_id']} / {retry['retry_round']}차\n"
                 f"재시도 대상: {retry['count']}명\n"
+                f"기존 연락처 재사용: {retry.get('contact_reused', 0)}명\n"
+                f"연락처 재처리 필요: {retry.get('contact_readd', 0)}명\n"
                 f"연락처/UID 준비: {c['ready']}명\n"
                 f"재시도 발송 성공: {s['success']}명\n"
                 f"재시도 실패: {s['failed']}명\n"
@@ -1053,7 +1226,7 @@ class MainWindow(QMainWindow):
             page = QWidget()
             page_layout = QVBoxLayout(page)
 
-            table = QTableWidget(0, 8 if key != "upload" else 4)
+            table = QTableWidget(0, 9 if key != "upload" else 4)
 
             if key == "upload":
                 table.setHorizontalHeaderLabels([
@@ -1067,7 +1240,8 @@ class MainWindow(QMainWindow):
                     "DB 상태",
                     "연락처 상태",
                     "Telegram UID",
-                    "마지막 오류",
+                    "오류 코드",
+                    "실패 사유",
                     "최근 변경",
                 ])
 
@@ -1170,12 +1344,8 @@ class MainWindow(QMainWindow):
 
             for index, row in enumerate(rows):
                 account_text = row["account_phone"] or row["account_name"] or ""
-                error_text = " / ".join(
-                    x for x in [
-                        row["error_code"] or "",
-                        row["error_message"] or "",
-                    ] if x
-                )
+                error_code = row["error_code"] or ""
+                failure_reason = row["error_message"] or ""
 
                 values = [
                     f"DB{row['id']}",
@@ -1184,7 +1354,8 @@ class MainWindow(QMainWindow):
                     row["status"] or "",
                     row["contact_status"] or "",
                     row["telegram_uid"] or "",
-                    error_text,
+                    error_code,
+                    failure_reason,
                     row["updated_at"] or "",
                 ]
 
@@ -1529,9 +1700,9 @@ class MainWindow(QMainWindow):
         top_buttons.addWidget(bulk_delete)
         l.addLayout(top_buttons)
 
-        self.account_table = QTableWidget(0, 6)
+        self.account_table = QTableWidget(0, 7)
         self.account_table.setHorizontalHeaderLabels(
-            ["선택", "번호", "계정", "상태", "마지막 오류", "세션 파일"]
+            ["선택", "번호", "계정", "상태", "마지막 오류", "진행창", "세션 파일"]
         )
         self.account_table.horizontalHeader().setStretchLastSection(True)
         self.account_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1863,7 +2034,7 @@ class MainWindow(QMainWindow):
         checked_before = set(self.checked_account_ids()) if self.account_table.rowCount() else set()
 
         rows = self.db.fetchall(
-            "SELECT id,name,status,last_error,session_file FROM telegram_accounts ORDER BY id"
+            "SELECT id,name,status,last_error,worker_sector,session_file FROM telegram_accounts ORDER BY id"
         )
         self.account_table.setRowCount(len(rows))
 
@@ -1882,6 +2053,7 @@ class MainWindow(QMainWindow):
                 row["name"],
                 row["status"],
                 row["last_error"] or "",
+                f"진행창 {int(row['worker_sector'] or 1)}",
                 row["session_file"],
             ]
             for c, v in enumerate(vals, start=1):
@@ -1889,6 +2061,8 @@ class MainWindow(QMainWindow):
 
         self.account_table.resizeColumnsToContents()
         self.account_table.setColumnWidth(0, 58)
+        if hasattr(self, "sector_tabs"):
+            QTimer.singleShot(0, self.refresh_progress_sectors)
 
     def reset_selected_account(self):
         account_id = self._current_account_id()
