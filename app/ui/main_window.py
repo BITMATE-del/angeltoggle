@@ -1,3 +1,4 @@
+import asyncio
 import threading
 from datetime import datetime
 
@@ -513,6 +514,27 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        if kind == "포스트봇체크":
+            if result.get("ok"):
+                info = result.get("result") or {}
+                text = (
+                    f"[ 상태 ] 정상 · PostBot 게시물 조회 성공\n"
+                    f"게시물 코드: {info.get('post_code', '')}\n"
+                    f"조회 결과: {info.get('result_count', 0)}개\n"
+                    f"게시물: {info.get('title', '')}"
+                )
+                self.postbot_status.setText(text)
+                self.logs.write(
+                    "SUCCESS",
+                    "PostBot",
+                    f"게시물 상태체크 성공 / 코드={info.get('post_code', '')} / 결과={info.get('result_count', 0)}개",
+                )
+            else:
+                error = result.get("error", "알 수 없는 오류")
+                self.postbot_status.setText(f"[ 상태 ] 오류 · {error}")
+                self.logs.write("ERROR", "PostBot", f"게시물 상태체크 실패 / {error}")
+            return
+
         self._set_busy(False)
         self.refresh_summary()
         self.refresh_work_status()
@@ -573,9 +595,17 @@ class MainWindow(QMainWindow):
         l = QVBoxLayout(w)
         l.addWidget(self.title("고객 DB", "C:\\엔젤토글> DB 업로드 및 중복 검수"))
 
+        db_buttons = QHBoxLayout()
+
         b = QPushButton("[ 고객 DB 업로드 · Excel / TXT ]")
         b.clicked.connect(self.import_db)
-        l.addWidget(b)
+
+        retry_failed = QPushButton("[ 실패 DB 다시 대기상태로 ]")
+        retry_failed.clicked.connect(self.reset_failed_db)
+
+        db_buttons.addWidget(b)
+        db_buttons.addWidget(retry_failed)
+        l.addLayout(db_buttons)
 
         self.db_result = QLabel("업로드된 파일이 없습니다.")
         self.db_result.setObjectName("상태패널")
@@ -681,37 +711,142 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "DB 업로드 오류", str(e))
 
+    def reset_failed_db(self):
+        failed = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE status='FAILED'"
+        )
+        count = int(failed["c"] or 0) if failed else 0
+
+        if count <= 0:
+            QMessageBox.information(
+                self,
+                "실패 DB 복구",
+                "대기상태로 돌릴 실패 DB가 없습니다."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "실패 DB 복구",
+            f"실패한 DB {count}개를 다시 대기상태로 돌리시겠습니까?\n\n"
+            "이미 연락처 추가가 성공한 DB는 연락처 상태와 기존 계정을 유지합니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            restored = self.send_engine.reset_failed_recipients()
+            self.refresh_summary()
+            self.refresh_work_status()
+            QMessageBox.information(
+                self,
+                "복구 완료",
+                f"실패 DB {restored}개를 다시 대기상태로 변경했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "실패 DB 복구 오류", str(e))
+
     def postbot_page(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(self.title("PostBot 게시물", "C:\\엔젤토글> 게시물 설정"))
+        l.addWidget(self.title("PostBot 게시물", "C:\\엔젤토글> 게시물 설정 및 상태확인"))
 
         hint = QLabel(
             "PostBot에서 만든 이미지 + 버튼 게시물을 등록합니다.\n"
-            "텍스트 메시지는 사용하지 않습니다."
+            "설정 저장 후 게시물을 실제 발송하지 않고 조회 상태만 확인할 수 있습니다."
         )
         hint.setObjectName("상태패널")
         l.addWidget(hint)
 
         form = QFormLayout()
-        self.postbot_username = QLineEdit(self.db.get_setting("postbot_username", "@PostBot") or "@PostBot")
+        self.postbot_username = QLineEdit(
+            self.db.get_setting("postbot_username", "@PostBot") or "@PostBot"
+        )
         self.postbot_input = QLineEdit(self.db.get_setting("postbot_link"))
         form.addRow("PostBot 사용자명", self.postbot_username)
         form.addRow("게시물 코드 / 링크", self.postbot_input)
         l.addLayout(form)
 
-        b = QPushButton("[ 게시물 설정 저장 ]")
-        b.clicked.connect(self.save_postbot)
-        l.addWidget(b)
+        buttons = QHBoxLayout()
+
+        save = QPushButton("[ 게시물 설정 저장 ]")
+        save.clicked.connect(self.save_postbot)
+
+        check = QPushButton("[ 저장 후 게시물 불러오기 · 상태체크 ]")
+        check.clicked.connect(self.save_and_check_postbot)
+
+        buttons.addWidget(save)
+        buttons.addWidget(check)
+        l.addLayout(buttons)
+
+        self.postbot_status = QLabel("[ 상태 ] 아직 확인하지 않았습니다.")
+        self.postbot_status.setObjectName("상태패널")
+        l.addWidget(self.postbot_status)
+
         l.addStretch()
         return w
 
-    def save_postbot(self):
+    def save_postbot(self, show_message=True):
         username = self.postbot_username.text().strip() or "@PostBot"
         self.db.set_setting("postbot_username", username)
         self.db.set_setting("postbot_link", self.postbot_input.text().strip())
         self.logs.write("INFO", "PostBot", "PostBot 게시물 설정 저장")
-        QMessageBox.information(self, "저장 완료", "PostBot 게시물 설정을 저장했습니다.")
+        if show_message:
+            QMessageBox.information(self, "저장 완료", "PostBot 게시물 설정을 저장했습니다.")
+
+    def save_and_check_postbot(self):
+        self.save_postbot(show_message=False)
+
+        username = self.postbot_username.text().strip() or "@PostBot"
+        post_value = self.postbot_input.text().strip()
+
+        if not post_value:
+            self.postbot_status.setText("[ 상태 ] 오류 · 게시물 코드/링크가 비어 있습니다.")
+            return
+
+        account = self.db.fetchone(
+            "SELECT * FROM telegram_accounts WHERE enabled=1 "
+            "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED','WORKER_ERROR') "
+            "ORDER BY id LIMIT 1"
+        )
+        if not account:
+            self.postbot_status.setText("[ 상태 ] 확인 불가 · 사용 가능한 텔레그램 계정이 없습니다.")
+            QMessageBox.warning(
+                self,
+                "PostBot 상태체크",
+                "PostBot 조회에 사용할 정상 텔레그램 계정이 없습니다."
+            )
+            return
+
+        self.postbot_status.setText("[ 상태 ] PostBot 게시물을 불러오는 중...")
+        threading.Thread(
+            target=self._postbot_check_worker,
+            args=(dict(account), username, post_value),
+            daemon=True,
+        ).start()
+
+    def _postbot_check_worker(self, account, username, post_value):
+        async def runner():
+            client = await self.send_engine.telegram.connect_account(account)
+            try:
+                return await self.send_engine.telegram.check_postbot(
+                    client,
+                    username,
+                    post_value,
+                )
+            finally:
+                await client.disconnect()
+
+        try:
+            result = asyncio.run(runner())
+            self.bridge.작업완료.emit("포스트봇체크", {"ok": True, "result": result})
+        except Exception as e:
+            self.bridge.작업완료.emit(
+                "포스트봇체크",
+                {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            )
 
     def accounts_page(self):
         w = QWidget()
@@ -735,9 +870,14 @@ class MainWindow(QMainWindow):
         chats.clicked.connect(self.open_selected_account_chats)
         reset = QPushButton("[ 선택 계정 프로그램 정지/오류 해제 ]")
         reset.clicked.connect(self.reset_selected_account)
+
+        delete = QPushButton("[ 선택 계정 삭제 ]")
+        delete.clicked.connect(self.delete_selected_account)
+
         row.addWidget(refresh)
         row.addWidget(chats)
         row.addWidget(reset)
+        row.addWidget(delete)
         l.addLayout(row)
         return w
 
@@ -755,6 +895,39 @@ class MainWindow(QMainWindow):
         dialog = ChatViewerDialog(self.db, self.logs, account_id, self)
         dialog.setStyleSheet(CMD_STYLE)
         dialog.exec()
+
+    def delete_selected_account(self):
+        row = self.account_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "계정 선택", "삭제할 계정을 먼저 선택하세요.")
+            return
+
+        account_id = int(self.account_table.item(row, 0).text())
+        account_name = self.account_table.item(row, 1).text()
+
+        answer = QMessageBox.question(
+            self,
+            "계정 삭제",
+            f"선택한 계정 [{account_name}]을 삭제하시겠습니까?\n\n"
+            "등록된 세션파일도 함께 삭제됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            result = self.session_import.delete_account(account_id)
+            self.refresh_accounts()
+            self.refresh_summary()
+
+            msg = "계정과 세션파일을 삭제했습니다."
+            if not result.get("session_deleted"):
+                msg = "계정은 삭제됐지만 세션파일 삭제는 실패했습니다. 작업 로그를 확인해주세요."
+
+            QMessageBox.information(self, "계정 삭제 완료", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "계정 삭제 오류", str(e))
 
     def import_sessions(self):
         paths, _ = QFileDialog.getOpenFileNames(
