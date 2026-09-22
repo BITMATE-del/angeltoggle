@@ -9,12 +9,23 @@ type Product={id:string;name:string;duration_days:number;max_devices:number};
 type License={
   id:string;code_prefix:string;duration_days:number;max_devices:number;
   customer_name:string|null;status:string;activated_at:string|null;expires_at:string|null;
+  point_balance_krw:number;sent_count:number;used_krw:number;
   angeltoggle_license_products?:{name?:string}|null;
 };
+type AccountUsage={
+  license_id:string;account_key:string;account_label:string;
+  sent_count:number;used_krw:number;last_sent_at:string|null;
+};
 type Dashboard={
-  counts:{total:number;active:number;unused:number;suspended:number;expiring:number};
+  counts:{
+    total:number;active:number;unused:number;suspended:number;expiring:number;
+    total_points_krw:number;total_sent_count:number;total_used_krw:number;
+  };
   products:Product[];
   licenses:License[];
+  account_usage:AccountUsage[];
+  point_history:any[];
+  send_unit_price_krw:number;
   username?:string;
   role?:string;
   must_change_password?:boolean;
@@ -124,6 +135,22 @@ export default function AdminPage(){
     finally{setBusy(false)}
   }
 
+  async function adjustPoints(id:string,direction:1|-1){
+    const raw=prompt(direction===1?"충전할 포인트 금액(원)을 입력하세요.":"차감할 포인트 금액(원)을 입력하세요.");
+    if(raw===null) return;
+    const amount=Math.trunc(Number(raw.replace(/,/g,"")));
+    if(!Number.isFinite(amount)||amount<=0){ alert("올바른 금액을 입력하세요."); return; }
+    const memo=prompt("메모를 입력하세요. (선택)")||"";
+    const signed=direction===1?amount:-amount;
+    if(!confirm((direction===1?"충전 ":"차감 ")+amount.toLocaleString()+"원을 적용할까요?")) return;
+    setBusy(true);setError("");
+    try{
+      const json=await api("POST",{action:"adjust_points",id,amount_krw:signed,memo});
+      setData(json);
+    }catch(e:any){setError(e.message)}
+    finally{setBusy(false)}
+  }
+
   async function changePassword(e:React.FormEvent<HTMLFormElement>){
     e.preventDefault();setBusy(true);setError("");
     const fd=new FormData(e.currentTarget);
@@ -159,7 +186,7 @@ export default function AdminPage(){
       <div>
         <div className="command">C:\\엔젤토글&gt; 판매관리</div>
         <h1>엔젤토글 판매관리 어드민</h1>
-        <p>기간코드 · PC 인증 · 만료 · 정지 · 기기초기화</p>
+        <p>기간코드 · PC 인증 · 발송포인트 · 계정별 발송량 · 만료 · 정지 · 기기초기화</p>
       </div>
       <div className="headActions">
         <span>{data.username} · {data.role}</span>
@@ -182,9 +209,10 @@ export default function AdminPage(){
     <section className="cards">
       <article><span>전체 라이선스</span><b>{data.counts.total}</b></article>
       <article><span>사용중</span><b>{data.counts.active}</b></article>
-      <article><span>미사용 코드</span><b>{data.counts.unused}</b></article>
-      <article><span>정지</span><b>{data.counts.suspended}</b></article>
-      <article><span>7일 이내 만료</span><b>{data.counts.expiring}</b></article>
+      <article><span>전체 잔여 포인트</span><b>{Number(data.counts.total_points_krw||0).toLocaleString()}원</b></article>
+      <article><span>누적 발송 성공</span><b>{Number(data.counts.total_sent_count||0).toLocaleString()}건</b></article>
+      <article><span>누적 사용 포인트</span><b>{Number(data.counts.total_used_krw||0).toLocaleString()}원</b></article>
+      <article><span>건당 발송비</span><b>{Number(data.send_unit_price_krw||10).toLocaleString()}원</b></article>
     </section>
 
     <section className="panel">
@@ -212,12 +240,15 @@ export default function AdminPage(){
       <h2>최근 라이선스</h2>
       <div className="tableWrap">
         <table>
-          <thead><tr><th>코드</th><th>상품</th><th>고객</th><th>상태</th><th>활성화</th><th>만료</th><th>PC</th><th>관리</th></tr></thead>
+          <thead><tr><th>코드</th><th>상품</th><th>고객</th><th>상태</th><th>포인트</th><th>발송</th><th>사용금액</th><th>활성화</th><th>만료</th><th>PC</th><th>관리</th></tr></thead>
           <tbody>{data.licenses.map(l=><tr key={l.id}>
             <td>{l.code_prefix}••••</td>
             <td>{l.angeltoggle_license_products?.name||l.duration_days+"일"}</td>
             <td>{l.customer_name||"-"}</td>
             <td><span className="status">{l.status}</span></td>
+            <td><b>{Number(l.point_balance_krw||0).toLocaleString()}원</b></td>
+            <td>{Number(l.sent_count||0).toLocaleString()}건</td>
+            <td>{Number(l.used_krw||0).toLocaleString()}원</td>
             <td>{fmt(l.activated_at)}</td>
             <td>{fmt(l.expires_at)}</td>
             <td>{l.max_devices}</td>
@@ -226,10 +257,32 @@ export default function AdminPage(){
                 ?<button onClick={()=>act(l.id,"resume")} disabled={busy}>재개</button>
                 :<button onClick={()=>act(l.id,"suspend")} disabled={busy}>정지</button>}
               <button onClick={()=>act(l.id,"extend30")} disabled={busy}>+30일</button>
+              <button onClick={()=>adjustPoints(l.id,1)} disabled={busy}>포인트 충전</button>
+              <button onClick={()=>adjustPoints(l.id,-1)} disabled={busy}>포인트 차감</button>
               <button onClick={()=>act(l.id,"reset_devices")} disabled={busy}>기기초기화</button>
               <button className="danger" onClick={()=>act(l.id,"revoke")} disabled={busy}>폐기</button>
             </div></td>
           </tr>)}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section className="panel">
+      <div className="command">C:\\엔젤토글&gt; Telegram 계정별 발송 사용량</div>
+      <h2>계정별 발송 통계</h2>
+      <div className="tableWrap">
+        <table>
+          <thead><tr><th>라이선스</th><th>Telegram 계정</th><th>발송 성공</th><th>사용 포인트</th><th>최근 발송</th></tr></thead>
+          <tbody>
+            {(data.account_usage||[]).map((u,i)=><tr key={u.license_id+"-"+u.account_key+"-"+i}>
+              <td>{data.licenses.find(l=>l.id===u.license_id)?.code_prefix||u.license_id.slice(0,8)}••••</td>
+              <td>{u.account_label||u.account_key}</td>
+              <td>{Number(u.sent_count||0).toLocaleString()}건</td>
+              <td>{Number(u.used_krw||0).toLocaleString()}원</td>
+              <td>{fmt(u.last_sent_at)}</td>
+            </tr>)}
+            {(data.account_usage||[]).length===0&&<tr><td colSpan={5}>아직 발송 성공 이력이 없습니다.</td></tr>}
+          </tbody>
         </table>
       </div>
     </section>
