@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.nav.setCurrentRow(0)
 
+        self.send_engine.rebalance_account_sectors()
         self.refresh_summary()
         self.refresh_accounts()
         self.refresh_work_status()
@@ -576,9 +577,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "sector_tabs"):
             return
 
-        info = self.send_engine.rebalance_account_sectors()
-        sector_count = int(info.get("sectors", 1) or 1)
-        total_accounts = int(info.get("accounts", 0) or 0)
+        sector_count = int(self.send_engine.sector_count() or 1)
+        total_row = self.db.fetchone("SELECT COUNT(*) c FROM telegram_accounts")
+        total_accounts = int(total_row["c"] or 0) if total_row else 0
 
         self.sector_summary.setText(
             f"진행창 {sector_count}개 · 등록 계정 {total_accounts}개 · 진행창당 최대 10개 계정"
@@ -2021,6 +2022,7 @@ class MainWindow(QMainWindow):
                 f"동일 이름 자동변경: {total['renamed']}개\n"
                 f"실패: {total['failed']}개"
             )
+            self.send_engine.rebalance_account_sectors()
             self.refresh_accounts()
             self.refresh_summary()
 
