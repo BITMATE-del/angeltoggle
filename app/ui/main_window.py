@@ -1801,7 +1801,7 @@ class MainWindow(QMainWindow):
         unassign.clicked.connect(self.unassign_checked_accounts)
 
         bulk_delete = QPushButton("[ 체크 계정 일괄 삭제 ]")
-        bulk_delete.clicked.connect(self.delete_checked_accounts)
+        bulk_delete.clicked.connect(self.delete_selected_account)
 
         top_buttons.addWidget(add)
         top_buttons.addWidget(unassign)
@@ -1835,7 +1835,7 @@ class MainWindow(QMainWindow):
         reset = QPushButton("[ 선택 계정 오류 해제 ]")
         reset.clicked.connect(self.reset_selected_account)
 
-        delete = QPushButton("[ 선택 계정 삭제 ]")
+        delete = QPushButton("[ 체크 계정 삭제 ]")
         delete.clicked.connect(self.delete_selected_account)
 
         row.addWidget(select_all)
@@ -2001,19 +2001,26 @@ class MainWindow(QMainWindow):
         }
 
     def delete_selected_account(self):
-        account_id = self._current_account_id()
-        if account_id is None:
-            QMessageBox.information(self, "계정 선택", "삭제할 계정을 먼저 선택하세요.")
-            return
+        account_ids = self.checked_account_ids()
 
-        row = self.account_table.currentRow()
-        account_name_item = self.account_table.item(row, 2)
-        account_name = account_name_item.text() if account_name_item else str(account_id)
+        if not account_ids:
+            account_id = self._current_account_id()
+            if account_id is not None:
+                account_ids = [account_id]
+
+        if not account_ids:
+            QMessageBox.information(
+                self,
+                "계정 선택",
+                "삭제할 계정을 체크해주세요."
+            )
+            return
 
         answer = QMessageBox.question(
             self,
             "계정 삭제",
-            f"선택한 계정 [{account_name}]을 삭제하시겠습니까?\n\n"
+            f"체크한 계정 {len(account_ids)}개를 삭제하시겠습니까?\n\n"
+            "진행 중 배정이 있으면 배정취소 여부를 확인한 뒤 삭제합니다.\n"
             "등록된 세션파일도 함께 삭제됩니다.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -2022,7 +2029,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            result = self._delete_accounts_with_optional_unassign([account_id])
+            result = self._delete_accounts_with_optional_unassign(account_ids)
             if result is None:
                 return
 
@@ -2030,6 +2037,7 @@ class MainWindow(QMainWindow):
             self.refresh_summary()
             self.refresh_work_status()
             self.refresh_completion_log()
+            self.refresh_db_status_tabs()
 
             msg = f"계정 {result['deleted']}개를 삭제했습니다."
             if result["unassigned"]:
