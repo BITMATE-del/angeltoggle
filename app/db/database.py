@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS recipients (
     normalized_phone TEXT NOT NULL,
     telegram_uid TEXT,
     telegram_username TEXT,
+    contact_name TEXT,
     assigned_account_id INTEGER,
     status TEXT NOT NULL DEFAULT 'PENDING',
     contact_status TEXT NOT NULL DEFAULT 'NOT_ADDED',
@@ -95,6 +96,9 @@ CREATE TABLE IF NOT EXISTS campaign_recipients (
     assigned_account_id INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'ASSIGNED',
     contact_status TEXT NOT NULL DEFAULT 'WAITING',
+    contact_added_at TEXT,
+    sent_at TEXT,
+    postbot_code TEXT,
     error_code TEXT,
     error_message TEXT,
     telegram_message_id TEXT,
@@ -176,6 +180,7 @@ class Database:
                 "import_id": "INTEGER",
                 "contact_status": "TEXT NOT NULL DEFAULT 'NOT_ADDED'",
                 "contact_added_at": "TEXT",
+                "contact_name": "TEXT",
             })
             self._ensure_columns(conn, "campaigns", {
                 "contact_ready_count": "INTEGER NOT NULL DEFAULT 0",
@@ -184,6 +189,9 @@ class Database:
             })
             self._ensure_columns(conn, "campaign_recipients", {
                 "contact_status": "TEXT NOT NULL DEFAULT 'WAITING'",
+                "contact_added_at": "TEXT",
+                "sent_at": "TEXT",
+                "postbot_code": "TEXT",
             })
 
     def execute(self, sql, params=()):
