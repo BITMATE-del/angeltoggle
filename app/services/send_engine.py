@@ -187,19 +187,24 @@ class SendEngine:
                     )
 
                     with self.db.connection() as conn:
-                        for recipient_id, user in success.items():
+                        for recipient_id, payload in success.items():
+                            user = payload["user"]
+                            contact_name = payload.get("contact_name") or ""
+
                             conn.execute(
-                                "UPDATE campaign_recipients SET contact_status='ADDED',updated_at=CURRENT_TIMESTAMP "
+                                "UPDATE campaign_recipients SET contact_status='ADDED',"
+                                "contact_added_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP "
                                 "WHERE campaign_id=? AND recipient_id=?",
                                 (campaign_id, recipient_id),
                             )
                             conn.execute(
-                                "UPDATE recipients SET telegram_uid=?,telegram_username=?,"
+                                "UPDATE recipients SET telegram_uid=?,telegram_username=?,contact_name=?,"
                                 "contact_status='ADDED',contact_added_at=CURRENT_TIMESTAMP,"
                                 "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                                 (
                                     str(getattr(user, "id", "")),
                                     getattr(user, "username", None),
+                                    contact_name,
                                     recipient_id,
                                 ),
                             )
@@ -377,8 +382,12 @@ class SendEngine:
             return
 
         try:
+            # 메시지 전송 단계에서는 전화번호를 다시 ImportContacts 하지 않는다.
+            # 실제 현재 연락처에 남아 있는 Telegram UID만 발송 대상으로 사용한다.
+            contact_ids = await self.telegram.current_contact_ids(client)
+
             targets = self.db.fetchall(
-                "SELECT cr.recipient_id,r.telegram_uid "
+                "SELECT cr.recipient_id,r.telegram_uid,r.contact_name "
                 "FROM campaign_recipients cr JOIN recipients r ON r.id=cr.recipient_id "
                 "WHERE cr.campaign_id=? AND cr.assigned_account_id=? "
                 "AND cr.contact_status='ADDED' AND cr.status IN ('ASSIGNED','SEND_PAUSED') "
@@ -386,26 +395,121 @@ class SendEngine:
                 (campaign_id, account_id),
             )
 
+            sendable = []
             for target in targets:
+                try:
+                    uid = int(target["telegram_uid"] or 0)
+                except Exception:
+                    uid = 0
+
+                if not uid or uid not in contact_ids:
+                    with self.db.connection() as conn:
+                        conn.execute(
+                            "UPDATE campaign_recipients SET status='FAILED',"
+                            "error_code='CONTACT_NOT_PRESENT',"
+                            "error_message='현재 텔레그램 연락처에 없는 대상',"
+                            "updated_at=CURRENT_TIMESTAMP "
+                            "WHERE campaign_id=? AND recipient_id=?",
+                            (campaign_id, target["recipient_id"]),
+                        )
+                        conn.execute(
+                            "UPDATE recipients SET status='FAILED',"
+                            "error_code='CONTACT_NOT_PRESENT',"
+                            "error_message='현재 텔레그램 연락처에 없는 대상',"
+                            "processed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP "
+                            "WHERE id=?",
+                            (target["recipient_id"],),
+                        )
+
+                    self.logs.write(
+                        "WARNING",
+                        "발송",
+                        "현재 연락처에 없는 대상이라 발송 제외",
+                        account_id=account_id,
+                        campaign_id=campaign_id,
+                        recipient_id=target["recipient_id"],
+                    )
+                    continue
+
+                sendable.append(target)
+
+            if not sendable:
+                self.logs.write(
+                    "WARNING",
+                    "발송",
+                    "현재 연락처에 남아 있는 발송 대상이 없습니다.",
+                    account_id=account_id,
+                    campaign_id=campaign_id,
+                )
+                return
+
+            # 계정별로 PostBot 게시물을 내 Saved Messages에 한 번 생성하고,
+            # 이후 해당 원본을 실제 연락처에게 포워딩한다.
+            try:
+                source_message, postbot_code = await self.telegram.prepare_postbot_source(
+                    client,
+                    campaign["postbot_username"],
+                    campaign["post_code"],
+                )
+            except RecipientError as e:
+                for target in sendable:
+                    self.db.execute(
+                        "UPDATE campaign_recipients SET status='FAILED',error_code=?,error_message=?,"
+                        "postbot_code=?,updated_at=CURRENT_TIMESTAMP "
+                        "WHERE campaign_id=? AND recipient_id=?",
+                        (
+                            e.code,
+                            str(e),
+                            campaign["post_code"],
+                            campaign_id,
+                            target["recipient_id"],
+                        ),
+                    )
+                self.logs.write(
+                    "ERROR",
+                    "발송",
+                    f"PostBot 원본 준비 실패: {e.code} / {e}",
+                    account_id=account_id,
+                    campaign_id=campaign_id,
+                )
+                return
+
+            for target in sendable:
                 claimed = self.db.execute_rowcount(
-                    "UPDATE campaign_recipients SET status='SENDING',updated_at=CURRENT_TIMESTAMP "
+                    "UPDATE campaign_recipients SET status='SENDING',postbot_code=?,"
+                    "updated_at=CURRENT_TIMESTAMP "
                     "WHERE campaign_id=? AND recipient_id=? AND assigned_account_id=? "
                     "AND contact_status='ADDED' AND status IN ('ASSIGNED','SEND_PAUSED')",
-                    (campaign_id, target["recipient_id"], account_id),
+                    (
+                        postbot_code,
+                        campaign_id,
+                        target["recipient_id"],
+                        account_id,
+                    ),
                 )
                 if claimed != 1:
                     continue
 
                 try:
                     peer = int(target["telegram_uid"])
-                    message_id = await self.telegram.send_postbot(
-                        client, peer, campaign["postbot_username"], campaign["post_code"]
+                    message_id = await self.telegram.forward_postbot(
+                        client,
+                        peer,
+                        source_message,
                     )
+
                     with self.db.connection() as conn:
                         conn.execute(
-                            "UPDATE campaign_recipients SET status='MESSAGE_SENT',telegram_message_id=?,"
-                            "updated_at=CURRENT_TIMESTAMP WHERE campaign_id=? AND recipient_id=?",
-                            (message_id, campaign_id, target["recipient_id"]),
+                            "UPDATE campaign_recipients SET status='MESSAGE_SENT',"
+                            "telegram_message_id=?,sent_at=CURRENT_TIMESTAMP,"
+                            "postbot_code=?,updated_at=CURRENT_TIMESTAMP "
+                            "WHERE campaign_id=? AND recipient_id=?",
+                            (
+                                message_id,
+                                postbot_code,
+                                campaign_id,
+                                target["recipient_id"],
+                            ),
                         )
                         conn.execute(
                             "UPDATE recipients SET status='MESSAGE_SENT',telegram_message_id=?,"
@@ -413,10 +517,13 @@ class SendEngine:
                             "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                             (message_id, target["recipient_id"]),
                         )
+
                     self.logs.write(
-                        "SUCCESS", "발송",
-                        f"게시물 발송 성공 / 메시지ID={message_id}",
-                        account_id=account_id, campaign_id=campaign_id,
+                        "SUCCESS",
+                        "발송",
+                        f"PostBot 게시물 포워딩 성공 / 메시지ID={message_id} / 코드={postbot_code}",
+                        account_id=account_id,
+                        campaign_id=campaign_id,
                         recipient_id=target["recipient_id"],
                     )
 
@@ -424,17 +531,28 @@ class SendEngine:
                     with self.db.connection() as conn:
                         conn.execute(
                             "UPDATE campaign_recipients SET status='FAILED',error_code=?,error_message=?,"
-                            "updated_at=CURRENT_TIMESTAMP WHERE campaign_id=? AND recipient_id=?",
-                            (e.code, str(e), campaign_id, target["recipient_id"]),
+                            "postbot_code=?,updated_at=CURRENT_TIMESTAMP "
+                            "WHERE campaign_id=? AND recipient_id=?",
+                            (
+                                e.code,
+                                str(e),
+                                postbot_code,
+                                campaign_id,
+                                target["recipient_id"],
+                            ),
                         )
                         conn.execute(
                             "UPDATE recipients SET status='FAILED',error_code=?,error_message=?,"
                             "processed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                             (e.code, str(e), target["recipient_id"]),
                         )
+
                     self.logs.write(
-                        "ERROR", "발송", f"{e.code}: {e}",
-                        account_id=account_id, campaign_id=campaign_id,
+                        "ERROR",
+                        "발송",
+                        f"{e.code}: {e}",
+                        account_id=account_id,
+                        campaign_id=campaign_id,
                         recipient_id=target["recipient_id"],
                     )
                     continue
@@ -442,8 +560,15 @@ class SendEngine:
                 except AccountWorkerError as e:
                     self.db.execute(
                         "UPDATE campaign_recipients SET status='UNCERTAIN',error_code=?,error_message=?,"
-                        "updated_at=CURRENT_TIMESTAMP WHERE campaign_id=? AND recipient_id=? AND status='SENDING'",
-                        (e.code, str(e), campaign_id, target["recipient_id"]),
+                        "postbot_code=?,updated_at=CURRENT_TIMESTAMP "
+                        "WHERE campaign_id=? AND recipient_id=? AND status='SENDING'",
+                        (
+                            e.code,
+                            str(e),
+                            postbot_code,
+                            campaign_id,
+                            target["recipient_id"],
+                        ),
                     )
                     self.db.execute(
                         "UPDATE recipients SET status='UNCERTAIN',error_code=?,error_message=?,"
