@@ -10,7 +10,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\AngelToggle
 DefaultGroupName=AngelToggle
 DisableProgramGroupPage=yes
-OutputDir=installer_output
+OutputDir=..\installer_output
 OutputBaseFilename=AngelToggle-Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -30,8 +30,8 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "추가 아이콘:"; Flags: unchecked
 
 [Files]
-Source: "dist\AngelToggle\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\AngelToggle\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\dist\AngelToggle\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\AngelToggle\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{autoprograms}\AngelToggle"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
