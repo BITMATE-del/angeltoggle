@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
     contact_ready_count INTEGER NOT NULL DEFAULT 0,
     success_count INTEGER NOT NULL DEFAULT 0,
     failed_count INTEGER NOT NULL DEFAULT 0,
+    retry_of_campaign_id INTEGER,
+    retry_round INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     contact_started_at TEXT,
     contact_finished_at TEXT,
@@ -114,6 +116,25 @@ ON recipients(normalized_phone);
 
 CREATE INDEX IF NOT EXISTS idx_recipient_status
 ON recipients(status, contact_status);
+
+CREATE TABLE IF NOT EXISTS retry_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_id INTEGER NOT NULL,
+    source_campaign_id INTEGER NOT NULL,
+    retry_campaign_id INTEGER NOT NULL,
+    retry_round INTEGER NOT NULL DEFAULT 1,
+    previous_status TEXT,
+    previous_error_code TEXT,
+    previous_error_message TEXT,
+    result_status TEXT NOT NULL DEFAULT 'RETRY_WAITING',
+    result_error_code TEXT,
+    result_error_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_retry_history_campaign
+ON retry_history(retry_campaign_id, recipient_id);
 
 CREATE TABLE IF NOT EXISTS work_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,6 +207,8 @@ class Database:
                 "contact_ready_count": "INTEGER NOT NULL DEFAULT 0",
                 "contact_started_at": "TEXT",
                 "contact_finished_at": "TEXT",
+                "retry_of_campaign_id": "INTEGER",
+                "retry_round": "INTEGER NOT NULL DEFAULT 0",
             })
             self._ensure_columns(conn, "campaign_recipients", {
                 "contact_status": "TEXT NOT NULL DEFAULT 'WAITING'",
