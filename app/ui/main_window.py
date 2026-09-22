@@ -1179,6 +1179,13 @@ class MainWindow(QMainWindow):
             f"[실패] {failed}명"
             f"{retry_text}"
         )
+        handoff = self.send_engine.residual_handoff_summary()
+        if handoff["waiting"] or handoff["blocked"] or handoff["final"]:
+            self.work_status.append(
+                f"[잔여승계] 대기 {handoff['waiting']} / "
+                f"수동확인 {handoff['blocked']} / 최종실패 {handoff['final']}"
+            )
+
         self._refresh_retry_button()
 
     def db_page(self):
@@ -1197,12 +1204,20 @@ class MainWindow(QMainWindow):
         unassign_db = QPushButton("[ 배정된 DB 다시 대기상태로 ]")
         unassign_db.clicked.connect(self.reset_assigned_db)
 
+        classify_handoff = QPushButton("[ 잔여 작업 분류 ]")
+        classify_handoff.clicked.connect(self.classify_residual_db)
+
+        assign_handoff = QPushButton("[ 재배정 대기 자동 배정 ]")
+        assign_handoff.clicked.connect(self.assign_residual_db)
+
         refresh = QPushButton("[ DB 상태 새로고침 ]")
         refresh.clicked.connect(self.refresh_db_status_tabs)
 
         db_buttons.addWidget(b)
         db_buttons.addWidget(retry_failed)
         db_buttons.addWidget(unassign_db)
+        db_buttons.addWidget(classify_handoff)
+        db_buttons.addWidget(assign_handoff)
         db_buttons.addWidget(refresh)
         l.addLayout(db_buttons)
 
@@ -1219,6 +1234,9 @@ class MainWindow(QMainWindow):
             ("진행중 DB", "running"),
             ("진행완료 DB", "completed"),
             ("실패 DB", "failed"),
+            ("재배정 대기", "reassign"),
+            ("수동 확인", "blocked"),
+            ("최종 실패", "final"),
             ("크리티컬 잔여 DB", "critical"),
             ("최근 업로드", "upload"),
         ]
@@ -1264,6 +1282,7 @@ class MainWindow(QMainWindow):
         base_select = (
             "SELECT r.id,r.phone,r.normalized_phone,r.status,r.contact_status,"
             "r.telegram_uid,r.error_code,r.error_message,r.updated_at,"
+            "r.handoff_status,r.handoff_reason,r.handoff_count,"
             "a.name account_name,a.phone account_phone "
             "FROM recipients r "
             "LEFT JOIN telegram_accounts a ON a.id=r.assigned_account_id "
@@ -1287,6 +1306,24 @@ class MainWindow(QMainWindow):
             return self.db.fetchall(
                 base_select +
                 "WHERE r.status='FAILED' ORDER BY r.id"
+            )
+
+        if kind == "reassign":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='REASSIGN_WAITING' ORDER BY r.id"
+            )
+
+        if kind == "blocked":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='REASSIGN_BLOCKED' ORDER BY r.id"
+            )
+
+        if kind == "final":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='FAILED_FINAL' ORDER BY r.id"
             )
 
         if kind == "critical":
@@ -1336,7 +1373,7 @@ class MainWindow(QMainWindow):
 
         counts = {}
 
-        for kind in ["pending", "assigned", "running", "completed", "failed", "critical"]:
+        for kind in ["pending", "assigned", "running", "completed", "failed", "reassign", "blocked", "final", "critical"]:
             rows = self._db_status_rows(kind)
             counts[kind] = len(rows)
 
@@ -1346,7 +1383,7 @@ class MainWindow(QMainWindow):
             for index, row in enumerate(rows):
                 account_text = row["account_phone"] or row["account_name"] or ""
                 error_code = row["error_code"] or ""
-                failure_reason = row["error_message"] or ""
+                failure_reason = row["handoff_reason"] or row["error_message"] or ""
 
                 values = [
                     f"DB{row['id']}",
@@ -1362,8 +1399,12 @@ class MainWindow(QMainWindow):
 
                 for col, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
-                    if kind in ("failed", "critical"):
+                    if kind in ("failed", "critical", "final"):
                         item.setForeground(QColor(255, 100, 100))
+                    elif kind == "reassign":
+                        item.setForeground(QColor(255, 214, 108))
+                    elif kind == "blocked":
+                        item.setForeground(QColor(255, 165, 100))
                     elif kind == "completed":
                         item.setForeground(QColor(110, 255, 150))
                     self.db_status_tables[kind].setItem(index, col, item)
@@ -1376,10 +1417,13 @@ class MainWindow(QMainWindow):
             "running": "진행중 DB",
             "completed": "진행완료 DB",
             "failed": "실패 DB",
+            "reassign": "재배정 대기",
+            "blocked": "수동 확인",
+            "final": "최종 실패",
             "critical": "크리티컬 잔여 DB",
         }
 
-        key_order = ["pending", "assigned", "running", "completed", "failed", "critical", "upload"]
+        key_order = ["pending", "assigned", "running", "completed", "failed", "reassign", "blocked", "final", "critical", "upload"]
         for tab_index, key in enumerate(key_order):
             if key == "upload":
                 self.db_tabs.setTabText(tab_index, "최근 업로드")
@@ -1395,6 +1439,9 @@ class MainWindow(QMainWindow):
             f"[진행중] {counts.get('running', 0)}명   |   "
             f"[완료] {counts.get('completed', 0)}명   |   "
             f"[실패] {counts.get('failed', 0)}명   |   "
+            f"[재배정대기] {counts.get('reassign', 0)}명   |   "
+            f"[수동확인] {counts.get('blocked', 0)}명   |   "
+            f"[최종실패] {counts.get('final', 0)}명   |   "
             f"[크리티컬 잔여] {counts.get('critical', 0)}명"
         )
 
@@ -1426,7 +1473,7 @@ class MainWindow(QMainWindow):
                 self.db_table.setItem(idx, col, item)
 
         self.db_table.resizeColumnsToContents()
-        self.db_tabs.setCurrentIndex(6)
+        self.db_tabs.setCurrentIndex(9)
 
     def import_db(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1491,6 +1538,66 @@ class MainWindow(QMainWindow):
             self.refresh_db_status_tabs()
         except Exception as e:
             QMessageBox.critical(self, "DB 업로드 오류", str(e))
+
+    def classify_residual_db(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "작업이 실행 중일 때는 잔여 DB를 분류할 수 없습니다."
+            )
+            return
+
+        latest = self.send_engine.latest_campaign()
+        if not latest:
+            QMessageBox.information(self, "잔여 작업", "분류할 작업이 없습니다.")
+            return
+
+        try:
+            result = self.send_engine.classify_residual_work(latest["id"])
+            self.refresh_db_status_tabs()
+            self.refresh_work_status()
+            QMessageBox.information(
+                self,
+                "잔여 작업 분류 완료",
+                f"재배정 대기: {result['queued']}건\n"
+                f"수동 확인: {result['blocked']}건\n"
+                f"최종 실패: {result['final']}건\n\n"
+                "Telegram 제한/FloodWait/PeerFlood/전송결과 불확실 건은 "
+                "자동 계정교체 대상에서 제외됩니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "잔여 작업 분류 오류", str(e))
+
+    def assign_residual_db(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "작업이 실행 중일 때는 재배정할 수 없습니다."
+            )
+            return
+
+        try:
+            result = self.send_engine.auto_assign_reassignment_waiting()
+            if result["campaign_ids"]:
+                self.current_campaign_id = result["campaign_ids"][-1]
+
+            self.refresh_db_status_tabs()
+            self.refresh_work_status()
+            self.refresh_accounts()
+            self.refresh_progress_sectors()
+
+            QMessageBox.information(
+                self,
+                "잔여 DB 자동 배정",
+                f"새 계정에 승계 배정: {result['assigned']}건\n"
+                f"아직 재배정 대기: {result['waiting']}건\n"
+                f"생성된 승계 작업: {len(result['campaign_ids'])}개\n\n"
+                "승계된 DB는 새 담당 계정 기준으로 연락처 추가 후 발송을 이어갑니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "잔여 DB 배정 오류", str(e))
 
     def reset_failed_db(self):
         failed = self.db.fetchone(
@@ -2023,8 +2130,42 @@ class MainWindow(QMainWindow):
                 f"실패: {total['failed']}개"
             )
             self.send_engine.rebalance_account_sectors()
+
+            handoff_text = ""
+            if not (self.worker_thread and self.worker_thread.is_alive()):
+                try:
+                    latest = self.send_engine.latest_campaign()
+                    if latest:
+                        classified = self.send_engine.classify_residual_work(latest["id"])
+                        handoff = self.send_engine.auto_assign_reassignment_waiting()
+                        if handoff["campaign_ids"]:
+                            self.current_campaign_id = handoff["campaign_ids"][-1]
+                        if classified["queued"] or handoff["assigned"]:
+                            handoff_text = (
+                                f"\n잔여작업 재배정대기: {classified['queued']}건"
+                                f"\n새 계정 승계배정: {handoff['assigned']}건"
+                                f"\n남은 대기: {handoff['waiting']}건"
+                            )
+                except Exception as handoff_error:
+                    self.logs.write(
+                        "WARNING",
+                        "승계",
+                        f"새 계정 등록 후 잔여작업 자동 승계 확인 실패: {handoff_error}",
+                    )
+
             self.refresh_accounts()
             self.refresh_summary()
+            self.refresh_db_status_tabs()
+            self.refresh_work_status()
+
+            if handoff_text:
+                QMessageBox.information(
+                    self,
+                    "잔여작업 자동 승계",
+                    "새 계정 등록 후 재배정 가능한 잔여 DB를 자동으로 배정했습니다."
+                    + handoff_text
+                    + "\n\n작업 실행 화면에서 전체 자동 진행을 눌러 이어서 처리할 수 있습니다."
+                )
 
         except Exception as e:
             QMessageBox.critical(self, "세션 등록 오류", str(e))
