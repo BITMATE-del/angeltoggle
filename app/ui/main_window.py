@@ -853,57 +853,230 @@ class MainWindow(QMainWindow):
         l = QVBoxLayout(w)
         l.addWidget(self.title("텔레그램 계정", "C:\\엔젤토글> 세션 관리"))
 
-        b = QPushButton("[ 세션 ZIP / SESSION 파일 등록 ]")
-        b.clicked.connect(self.import_sessions)
-        l.addWidget(b)
+        top_buttons = QHBoxLayout()
 
-        self.account_table = QTableWidget(0, 5)
-        self.account_table.setHorizontalHeaderLabels(["번호", "계정", "상태", "마지막 오류", "세션 파일"])
+        add = QPushButton("[ 세션 ZIP / SESSION 파일 등록 ]")
+        add.clicked.connect(self.import_sessions)
+
+        unassign = QPushButton("[ 체크 계정 배정취소 ]")
+        unassign.clicked.connect(self.unassign_checked_accounts)
+
+        bulk_delete = QPushButton("[ 체크 계정 일괄 삭제 ]")
+        bulk_delete.clicked.connect(self.delete_checked_accounts)
+
+        top_buttons.addWidget(add)
+        top_buttons.addWidget(unassign)
+        top_buttons.addWidget(bulk_delete)
+        l.addLayout(top_buttons)
+
+        self.account_table = QTableWidget(0, 6)
+        self.account_table.setHorizontalHeaderLabels(
+            ["선택", "번호", "계정", "상태", "마지막 오류", "세션 파일"]
+        )
         self.account_table.horizontalHeader().setStretchLastSection(True)
         self.account_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.account_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.account_table.setColumnWidth(0, 58)
         l.addWidget(self.account_table)
 
         row = QHBoxLayout()
+
+        select_all = QPushButton("[ 전체 체크 ]")
+        select_all.clicked.connect(lambda: self.set_all_account_checks(True))
+
+        clear_all = QPushButton("[ 전체 체크 해제 ]")
+        clear_all.clicked.connect(lambda: self.set_all_account_checks(False))
+
         refresh = QPushButton("[ 계정 새로고침 ]")
         refresh.clicked.connect(self.refresh_accounts)
+
         chats = QPushButton("[ 선택 계정 대화창 보기 ]")
         chats.clicked.connect(self.open_selected_account_chats)
-        reset = QPushButton("[ 선택 계정 프로그램 정지/오류 해제 ]")
+
+        reset = QPushButton("[ 선택 계정 오류 해제 ]")
         reset.clicked.connect(self.reset_selected_account)
 
         delete = QPushButton("[ 선택 계정 삭제 ]")
         delete.clicked.connect(self.delete_selected_account)
 
+        row.addWidget(select_all)
+        row.addWidget(clear_all)
         row.addWidget(refresh)
         row.addWidget(chats)
         row.addWidget(reset)
         row.addWidget(delete)
         l.addLayout(row)
+
+        info = QLabel(
+            "배정취소는 아직 완료되지 않은 작업만 해제하며, 발송 완료 이력은 유지됩니다.\n"
+            "계정 삭제 시 진행 중 배정이 있으면 먼저 배정취소 후 삭제할 수 있습니다."
+        )
+        info.setObjectName("보조")
+        l.addWidget(info)
+
         return w
 
-    def open_selected_account_chats(self):
+    def _current_account_id(self):
         row = self.account_table.currentRow()
         if row < 0:
+            return None
+        item = self.account_table.item(row, 1)
+        if not item:
+            return None
+        try:
+            return int(item.text())
+        except Exception:
+            return None
+
+    def checked_account_ids(self):
+        ids = []
+        for row in range(self.account_table.rowCount()):
+            item = self.account_table.item(row, 0)
+            id_item = self.account_table.item(row, 1)
+            if (
+                item
+                and id_item
+                and item.checkState() == Qt.Checked
+            ):
+                try:
+                    ids.append(int(id_item.text()))
+                except Exception:
+                    pass
+        return ids
+
+    def set_all_account_checks(self, checked):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for row in range(self.account_table.rowCount()):
+            item = self.account_table.item(row, 0)
+            if item:
+                item.setCheckState(state)
+
+    def open_selected_account_chats(self):
+        account_id = self._current_account_id()
+        if account_id is None:
             QMessageBox.information(self, "계정 선택", "대화창을 볼 계정을 먼저 선택하세요.")
             return
 
-        item = self.account_table.item(row, 0)
-        if not item:
-            return
-
-        account_id = int(item.text())
         dialog = ChatViewerDialog(self.db, self.logs, account_id, self)
         dialog.setStyleSheet(CMD_STYLE)
         dialog.exec()
 
+    def unassign_checked_accounts(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "연락처 추가/발송 작업이 실행 중일 때는 배정취소할 수 없습니다."
+            )
+            return
+
+        account_ids = self.checked_account_ids()
+        if not account_ids:
+            QMessageBox.information(self, "계정 체크", "배정취소할 계정을 체크해주세요.")
+            return
+
+        active = self.db.fetchone(
+            "SELECT COUNT(*) c FROM campaign_recipients "
+            "WHERE assigned_account_id IN (" + ",".join("?" for _ in account_ids) + ") "
+            "AND status!='MESSAGE_SENT'",
+            tuple(account_ids),
+        )
+        count = int(active["c"] or 0) if active else 0
+
+        if count <= 0:
+            QMessageBox.information(
+                self,
+                "배정취소",
+                "체크한 계정에 취소할 진행 중 배정이 없습니다."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "배정취소",
+            f"체크한 계정의 진행 중 배정 {count}건을 취소하시겠습니까?\n\n"
+            "해당 고객 DB는 다시 대기상태로 돌아가며, 이미 발송 완료된 이력은 유지됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            cancelled = self.send_engine.cancel_active_assignments(
+                account_ids=account_ids
+            )
+            self.refresh_accounts()
+            self.refresh_summary()
+            self.refresh_work_status()
+            self.refresh_completion_log()
+            QMessageBox.information(
+                self,
+                "배정취소 완료",
+                f"진행 중 배정 {cancelled}건을 취소하고 고객 DB를 대기상태로 돌렸습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "배정취소 오류", str(e))
+
+    def _delete_accounts_with_optional_unassign(self, account_ids):
+        if self.worker_thread and self.worker_thread.is_alive():
+            raise RuntimeError("작업 실행 중에는 계정을 삭제할 수 없습니다.")
+
+        account_ids = [int(x) for x in account_ids]
+        if not account_ids:
+            return {"deleted": 0, "session_failed": 0, "unassigned": 0}
+
+        marks = ",".join("?" for _ in account_ids)
+        active = self.db.fetchone(
+            f"SELECT COUNT(*) c FROM campaign_recipients "
+            f"WHERE assigned_account_id IN ({marks}) AND status!='MESSAGE_SENT'",
+            tuple(account_ids),
+        )
+        active_count = int(active["c"] or 0) if active else 0
+
+        unassigned = 0
+        if active_count > 0:
+            answer = QMessageBox.question(
+                self,
+                "배정된 계정",
+                f"선택한 계정에 진행 중 배정 {active_count}건이 있습니다.\n\n"
+                "배정을 취소하고 계정을 삭제하시겠습니까?\n"
+                "고객 DB는 다시 대기상태로 돌아갑니다.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return None
+
+            unassigned = self.send_engine.cancel_active_assignments(
+                account_ids=account_ids
+            )
+
+        deleted = 0
+        session_failed = 0
+
+        for account_id in account_ids:
+            result = self.session_import.delete_account(account_id)
+            if result.get("deleted"):
+                deleted += 1
+            if not result.get("session_deleted"):
+                session_failed += 1
+
+        return {
+            "deleted": deleted,
+            "session_failed": session_failed,
+            "unassigned": unassigned,
+        }
+
     def delete_selected_account(self):
-        row = self.account_table.currentRow()
-        if row < 0:
+        account_id = self._current_account_id()
+        if account_id is None:
             QMessageBox.information(self, "계정 선택", "삭제할 계정을 먼저 선택하세요.")
             return
 
-        account_id = int(self.account_table.item(row, 0).text())
-        account_name = self.account_table.item(row, 1).text()
+        row = self.account_table.currentRow()
+        account_name_item = self.account_table.item(row, 2)
+        account_name = account_name_item.text() if account_name_item else str(account_id)
 
         answer = QMessageBox.question(
             self,
@@ -917,17 +1090,62 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            result = self.session_import.delete_account(account_id)
+            result = self._delete_accounts_with_optional_unassign([account_id])
+            if result is None:
+                return
+
             self.refresh_accounts()
             self.refresh_summary()
+            self.refresh_work_status()
+            self.refresh_completion_log()
 
-            msg = "계정과 세션파일을 삭제했습니다."
-            if not result.get("session_deleted"):
-                msg = "계정은 삭제됐지만 세션파일 삭제는 실패했습니다. 작업 로그를 확인해주세요."
+            msg = f"계정 {result['deleted']}개를 삭제했습니다."
+            if result["unassigned"]:
+                msg += f"\n진행 중 배정 {result['unassigned']}건을 취소했습니다."
+            if result["session_failed"]:
+                msg += f"\n세션파일 {result['session_failed']}개는 삭제하지 못했습니다."
 
             QMessageBox.information(self, "계정 삭제 완료", msg)
         except Exception as e:
             QMessageBox.critical(self, "계정 삭제 오류", str(e))
+
+    def delete_checked_accounts(self):
+        account_ids = self.checked_account_ids()
+        if not account_ids:
+            QMessageBox.information(self, "계정 체크", "삭제할 계정을 체크해주세요.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "계정 일괄 삭제",
+            f"체크한 계정 {len(account_ids)}개를 일괄 삭제하시겠습니까?\n\n"
+            "진행 중 배정이 있으면 배정취소 여부를 한 번 더 확인합니다.\n"
+            "등록된 세션파일도 함께 삭제됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            result = self._delete_accounts_with_optional_unassign(account_ids)
+            if result is None:
+                return
+
+            self.refresh_accounts()
+            self.refresh_summary()
+            self.refresh_work_status()
+            self.refresh_completion_log()
+
+            msg = f"계정 {result['deleted']}개를 삭제했습니다."
+            if result["unassigned"]:
+                msg += f"\n진행 중 배정 {result['unassigned']}건을 취소했습니다."
+            if result["session_failed"]:
+                msg += f"\n세션파일 {result['session_failed']}개는 삭제하지 못했습니다."
+
+            QMessageBox.information(self, "일괄 삭제 완료", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "일괄 삭제 오류", str(e))
 
     def import_sessions(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -984,25 +1202,48 @@ class MainWindow(QMainWindow):
     def refresh_accounts(self):
         if not hasattr(self, "account_table"):
             return
+
+        checked_before = set(self.checked_account_ids()) if self.account_table.rowCount() else set()
+
         rows = self.db.fetchall(
             "SELECT id,name,status,last_error,session_file FROM telegram_accounts ORDER BY id"
         )
         self.account_table.setRowCount(len(rows))
+
         for r, row in enumerate(rows):
-            vals = [row["id"], row["name"], row["status"], row["last_error"] or "", row["session_file"]]
-            for c, v in enumerate(vals):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.Checked if int(row["id"]) in checked_before else Qt.Unchecked
+            )
+            self.account_table.setItem(r, 0, check_item)
+
+            vals = [
+                row["id"],
+                row["name"],
+                row["status"],
+                row["last_error"] or "",
+                row["session_file"],
+            ]
+            for c, v in enumerate(vals, start=1):
                 self.account_table.setItem(r, c, QTableWidgetItem(str(v)))
 
+        self.account_table.resizeColumnsToContents()
+        self.account_table.setColumnWidth(0, 58)
+
     def reset_selected_account(self):
-        row = self.account_table.currentRow()
-        if row < 0:
+        account_id = self._current_account_id()
+        if account_id is None:
             QMessageBox.information(self, "계정 선택", "복구할 계정을 먼저 선택하세요.")
             return
-        account_id = int(self.account_table.item(row, 0).text())
+
         self.send_engine.clear_local_account_stop(account_id)
         self.refresh_accounts()
         QMessageBox.information(
-            self, "상태 해제 완료",
+            self,
+            "상태 해제 완료",
             "프로그램 내부 정지/오류 상태를 해제했습니다.\n"
             "다음 작업에서 실제 텔레그램 계정 상태를 다시 확인합니다."
         )
