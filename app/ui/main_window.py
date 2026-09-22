@@ -1,7 +1,7 @@
 import threading
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtCore import Qt, QObject, Signal, QTimer
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import *
 
