@@ -1,6 +1,6 @@
-import re
 from pathlib import Path
 from openpyxl import load_workbook
+from app.core.phone_utils import normalize_korean_phone, format_korean_international
 
 def normalize_phone(value):
     if value is None:
@@ -70,7 +70,7 @@ class DBImportService:
                 )
                 self.logs.write(
                     "WARNING", "DB",
-                    f"중복번호 검수: {normalized} / {reason}"
+                    f"중복번호 검수: {format_korean_international(normalized)} / {reason}"
                 )
                 continue
 
