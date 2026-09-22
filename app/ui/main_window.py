@@ -289,43 +289,84 @@ class MainWindow(QMainWindow):
     def work_page(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(self.title("작업 실행", "C:\\엔젤토글> 연락처 추가 -> 게시물 발송"))
+        l.addWidget(self.title("작업 실행", "C:\\엔젤토글> 연락처 추가 -> UID 확인 -> PostBot 발송"))
 
         info = QLabel(
-            "작업은 두 단계로 분리됩니다.\n"
-            "1단계에서 연락처를 먼저 추가하고, 실제로 추가된 인원만 2단계 게시물 발송 대상으로 사용합니다.\n"
-            "예: 최대 40명 설정 후 33명만 추가되면 33명으로 연락처 단계가 종료되며, 그 33명은 즉시 게시물 발송 가능합니다."
+            "발송 작업을 시작하면 아래 실시간 진행 로그에서 현재 처리 단계를 바로 확인할 수 있습니다.\n"
+            "연락처 추가 → UID Resolve/중복확인 → PostBot Inline Query → 전송 → message_id 확인 순서로 표시됩니다."
         )
         info.setObjectName("상태패널")
         l.addWidget(info)
 
         self.work_status = QTextEdit()
         self.work_status.setReadOnly(True)
-        self.work_status.setMaximumHeight(215)
+        self.work_status.setMaximumHeight(105)
         l.addWidget(self.work_status)
 
-        step1 = QGroupBox("1단계 · 연락처 추가")
-        step1_layout = QVBoxLayout(step1)
-        self.contact_button = QPushButton("[ 연락처 추가 시작 · 10명씩 빠른 처리 ]")
-        self.contact_button.setMinimumHeight(56)
+        action_row = QHBoxLayout()
+
+        self.contact_button = QPushButton("[ 1단계 · 연락처 추가 시작 ]")
+        self.contact_button.setMinimumHeight(48)
         self.contact_button.clicked.connect(self.start_contact_stage)
-        step1_layout.addWidget(self.contact_button)
-        l.addWidget(step1)
 
-        step2 = QGroupBox("2단계 · 게시물 발송")
-        step2_layout = QVBoxLayout(step2)
-        self.send_button = QPushButton("[ 추가 완료 연락처에 게시물 발송 ]")
-        self.send_button.setMinimumHeight(56)
+        self.send_button = QPushButton("[ 2단계 · 게시물 발송 시작 ]")
+        self.send_button.setMinimumHeight(48)
         self.send_button.clicked.connect(self.start_send_stage)
-        step2_layout.addWidget(self.send_button)
-        l.addWidget(step2)
 
-        self.auto_button = QPushButton("[ 전체 자동 진행 · 연락처 추가 후 게시물 발송 ]")
-        self.auto_button.setMinimumHeight(62)
+        self.auto_button = QPushButton("[ 전체 자동 진행 ]")
+        self.auto_button.setMinimumHeight(48)
         self.auto_button.clicked.connect(self.start_full_auto)
-        l.addWidget(self.auto_button)
-        l.addStretch()
+
+        action_row.addWidget(self.contact_button)
+        action_row.addWidget(self.send_button)
+        action_row.addWidget(self.auto_button)
+        l.addLayout(action_row)
+
+        live_group = QGroupBox("실시간 작업 진행 로그")
+        live_layout = QVBoxLayout(live_group)
+
+        live_top = QHBoxLayout()
+        self.work_live_state = QLabel("[ 대기 ] 작업을 시작하면 진행 상황이 표시됩니다.")
+        self.work_live_state.setObjectName("보조")
+
+        clear_live = QPushButton("[ 로그 지우기 ]")
+        clear_live.clicked.connect(self.clear_work_live_log)
+
+        live_top.addWidget(self.work_live_state, 1)
+        live_top.addWidget(clear_live)
+        live_layout.addLayout(live_top)
+
+        self.work_live_log = QTextEdit()
+        self.work_live_log.setReadOnly(True)
+        self.work_live_log.setFont(QFont("Consolas", 10))
+        self.work_live_log.setPlainText(
+            "[대기] 발송 시작 버튼을 누르면 이 화면에서 실시간 로그를 확인할 수 있습니다."
+        )
+        live_layout.addWidget(self.work_live_log)
+
+        l.addWidget(live_group, 1)
         return w
+
+    def clear_work_live_log(self):
+        if hasattr(self, "work_live_log"):
+            self.work_live_log.clear()
+            self.work_live_log.setPlainText("[대기] 작업 로그를 기다리고 있습니다.")
+        if hasattr(self, "work_live_state"):
+            self.work_live_state.setText("[ 대기 ]")
+
+    def _prepare_work_live_log(self, title, campaign_id=None):
+        if not hasattr(self, "work_live_log"):
+            return
+
+        self.work_live_log.clear()
+        suffix = f" / 작업 #{campaign_id}" if campaign_id else ""
+        self.work_live_log.append(
+            f"[시작] {title}{suffix}\n"
+            f"[안내] 실제 처리 결과가 아래에 실시간으로 표시됩니다."
+        )
+        self.work_live_state.setText(f"[ 실행중 ] {title}{suffix}")
+        bar = self.work_live_log.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _check_base(self, need_post=False):
         api_ok = bool(self.db.get_setting("telegram_api_id")) and bool(self.db.get_setting("telegram_api_hash"))
@@ -376,6 +417,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_busy(True)
+        self._prepare_work_live_log("연락처 추가 + UID 확인", campaign_id)
         self.worker_thread = threading.Thread(
             target=self._background_contact,
             args=(campaign_id,),
@@ -416,6 +458,7 @@ class MainWindow(QMainWindow):
 
         self.current_campaign_id = latest["id"]
         self._set_busy(True)
+        self._prepare_work_live_log("PostBot 게시물 발송", latest["id"])
         self.worker_thread = threading.Thread(
             target=self._background_send,
             args=(latest["id"],),
@@ -448,6 +491,7 @@ class MainWindow(QMainWindow):
             return
 
         self._set_busy(True)
+        self._prepare_work_live_log("전체 자동 진행", campaign_id)
         self.worker_thread = threading.Thread(
             target=self._background_full_auto,
             args=(campaign_id,),
@@ -536,6 +580,11 @@ class MainWindow(QMainWindow):
             return
 
         self._set_busy(False)
+        if hasattr(self, "work_live_state"):
+            if kind == "오류":
+                self.work_live_state.setText("[ 오류 ] 작업이 중단되었습니다. 아래 로그를 확인하세요.")
+            else:
+                self.work_live_state.setText("[ 완료 ] 작업이 종료되었습니다.")
         self.refresh_summary()
         self.refresh_work_status()
         self.refresh_accounts()
@@ -1415,13 +1464,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "작업완료 DB 오류", str(e))
 
     def append_log(self, item):
-        if not hasattr(self, "log_view"):
-            return
-        if self.log_view.toPlainText().startswith("[대기]"):
-            self.log_view.clear()
-
         account = f" / 계정 {item['account_id']}" if item.get("account_id") else ""
         campaign = f" / 작업 {item['campaign_id']}" if item.get("campaign_id") else ""
+        recipient = f" / DB {item['recipient_id']}" if item.get("recipient_id") else ""
         level = {
             "INFO": "안내",
             "SUCCESS": "성공",
@@ -1429,9 +1474,42 @@ class MainWindow(QMainWindow):
             "ERROR": "오류",
         }.get(item.get("level"), item.get("level"))
 
-        self.log_view.append(
-            f"[{item['time']}] [{level}] [{item['category']}]{campaign}{account} :: {item['message']}"
+        line = (
+            f"[{item['time']}] [{level}] [{item['category']}]"
+            f"{campaign}{account}{recipient} :: {item['message']}"
         )
+
+        if hasattr(self, "log_view"):
+            if self.log_view.toPlainText().startswith("[대기]"):
+                self.log_view.clear()
+            self.log_view.append(line)
+            bar = self.log_view.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+        if hasattr(self, "work_live_log"):
+            if self.work_live_log.toPlainText().startswith("[대기]"):
+                self.work_live_log.clear()
+
+            current_campaign = self.current_campaign_id
+            item_campaign = item.get("campaign_id")
+
+            # 작업 실행 화면에는 현재 작업 관련 로그를 우선 표시한다.
+            if (
+                current_campaign is None
+                or item_campaign is None
+                or int(item_campaign) == int(current_campaign)
+            ):
+                self.work_live_log.append(line)
+                bar = self.work_live_log.verticalScrollBar()
+                bar.setValue(bar.maximum())
+
+                if hasattr(self, "work_live_state"):
+                    if item.get("level") == "ERROR":
+                        self.work_live_state.setText("[ 진행중 · 오류 발생 ] 아래 로그 확인")
+                    elif item.get("level") == "SUCCESS":
+                        self.work_live_state.setText("[ 진행중 · 성공 응답 확인 ]")
+                    else:
+                        self.work_live_state.setText("[ 진행중 ] 실시간 처리 중...")
 
     def settings_page(self):
         w = QWidget()
