@@ -78,6 +78,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
           if (-not (Test-Path installer_output\AngelToggle-Setup.exe)) { throw "AngelToggle-Setup.exe missing" }
 
+      - name: Verify installer by silent install
+        shell: pwsh
+        run: |
+          $testDir = Join-Path $env:RUNNER_TEMP "AngelToggle-Installer-Test"
+          if (Test-Path $testDir) { Remove-Item -Recurse -Force $testDir }
+          $p = Start-Process -FilePath ".\installer_output\AngelToggle-Setup.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon","/DIR=$testDir" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Installer validation failed. ExitCode=$($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $testDir "AngelToggle.exe"))) { throw "Installed AngelToggle.exe missing" }
+          Remove-Item -Recurse -Force $testDir
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
