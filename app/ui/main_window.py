@@ -322,6 +322,19 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.auto_button)
         l.addLayout(action_row)
 
+        retry_row = QHBoxLayout()
+        self.retry_failed_button = QPushButton("[ 실패 0건만 다시 재시도 ]")
+        self.retry_failed_button.setMinimumHeight(48)
+        self.retry_failed_button.setEnabled(False)
+        self.retry_failed_button.clicked.connect(self.start_failed_retry)
+
+        self.retry_history_label = QLabel("[재시도 이력] 없음")
+        self.retry_history_label.setObjectName("보조")
+
+        retry_row.addWidget(self.retry_failed_button)
+        retry_row.addWidget(self.retry_history_label, 1)
+        l.addLayout(retry_row)
+
         live_group = QGroupBox("실시간 작업 진행 로그")
         live_layout = QVBoxLayout(live_group)
 
@@ -397,6 +410,11 @@ class MainWindow(QMainWindow):
         self.contact_button.setEnabled(not busy)
         self.send_button.setEnabled(not busy)
         self.auto_button.setEnabled(not busy)
+        if hasattr(self, "retry_failed_button"):
+            if busy:
+                self.retry_failed_button.setEnabled(False)
+            else:
+                self._refresh_retry_button()
         self.top_state.setText("[ 작업 실행중 ]" if busy else "[ 시스템 정상 ]")
 
     def start_contact_stage(self):
@@ -510,6 +528,152 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.bridge.작업완료.emit("오류", str(e))
 
+    def _latest_failed_count(self):
+        latest = self.send_engine.latest_campaign()
+        if not latest:
+            return None, 0
+
+        row = self.db.fetchone(
+            "SELECT COUNT(*) c FROM campaign_recipients cr "
+            "JOIN recipients r ON r.id=cr.recipient_id "
+            "WHERE cr.campaign_id=? AND cr.status='FAILED' AND r.status='FAILED'",
+            (latest["id"],),
+        )
+        return latest, int(row["c"] or 0) if row else 0
+
+    def _refresh_retry_button(self):
+        if not hasattr(self, "retry_failed_button"):
+            return
+
+        latest, failed_count = self._latest_failed_count()
+        self.retry_failed_button.setText(
+            f"[ 실패 {failed_count}건만 다시 재시도 ]"
+        )
+        busy = bool(self.worker_thread and self.worker_thread.is_alive())
+        self.retry_failed_button.setEnabled(
+            bool(latest and failed_count > 0 and not busy)
+        )
+
+        if hasattr(self, "retry_history_label"):
+            if not latest:
+                self.retry_history_label.setText("[재시도 이력] 없음")
+                return
+
+            if int(latest["retry_round"] or 0) > 0:
+                history = self.db.fetchone(
+                    "SELECT "
+                    "COUNT(*) total,"
+                    "SUM(CASE WHEN result_status='MESSAGE_SENT' THEN 1 ELSE 0 END) success,"
+                    "SUM(CASE WHEN result_status='FAILED' THEN 1 ELSE 0 END) failed,"
+                    "SUM(CASE WHEN result_status NOT IN ('MESSAGE_SENT','FAILED') THEN 1 ELSE 0 END) remaining "
+                    "FROM retry_history WHERE retry_campaign_id=?",
+                    (latest["id"],),
+                )
+                self.retry_history_label.setText(
+                    f"[재시도 이력] {latest['retry_round']}차 · "
+                    f"대상 {int(history['total'] or 0)} / "
+                    f"성공 {int(history['success'] or 0)} / "
+                    f"실패 {int(history['failed'] or 0)} / "
+                    f"잔여 {int(history['remaining'] or 0)}"
+                )
+            else:
+                self.retry_history_label.setText(
+                    f"[재시도 이력] 작업 #{latest['id']} · 실패 {failed_count}건"
+                )
+
+    def start_failed_retry(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.information(
+                self,
+                "작업 중",
+                "현재 다른 작업이 실행 중입니다."
+            )
+            return
+
+        latest, failed_count = self._latest_failed_count()
+        if not latest or failed_count <= 0:
+            QMessageBox.information(
+                self,
+                "실패건 재시도",
+                "현재 작업에서 재시도할 실패 DB가 없습니다."
+            )
+            self._refresh_retry_button()
+            return
+
+        accounts = self.db.fetchone(
+            "SELECT COUNT(*) c FROM telegram_accounts WHERE enabled=1 "
+            "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED','WORKER_ERROR')"
+        )
+        if not accounts or int(accounts["c"] or 0) <= 0:
+            QMessageBox.warning(
+                self,
+                "실패건 재시도",
+                "재시도에 사용할 정상 텔레그램 계정이 없습니다."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "실패건만 다시 재시도",
+            f"실패 {failed_count}건만 다시 대기상태로 복구하고 "
+            "정상 계정에 새로 재배정하여 전송하시겠습니까?\n\n"
+            "기존 MESSAGE_SENT 성공건은 절대 다시 처리하지 않습니다.\n"
+            "실패건은 연락처 추가부터 다시 진행합니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            retry = self.send_engine.create_failed_retry_campaign(
+                latest["id"],
+                latest["postbot_username"],
+                latest["post_code"],
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "재시도 작업 생성 오류", str(e))
+            return
+
+        retry_campaign_id = retry["campaign_id"]
+        self.current_campaign_id = retry_campaign_id
+        self._set_busy(True)
+        self._prepare_work_live_log(
+            f"실패 DB {retry['count']}건 · {retry['retry_round']}차 재시도",
+            retry_campaign_id,
+        )
+
+        self.worker_thread = threading.Thread(
+            target=self._background_failed_retry,
+            args=(retry,),
+            daemon=True,
+        )
+        self.worker_thread.start()
+
+    def _background_failed_retry(self, retry):
+        campaign_id = retry["campaign_id"]
+        try:
+            contact = self.send_engine.run_contact_stage(campaign_id)
+            if contact["ready"] > 0:
+                sent = self.send_engine.run_send_stage(campaign_id)
+            else:
+                sent = {
+                    "success": 0,
+                    "failed": contact["failed"],
+                    "remaining": contact["paused"],
+                }
+
+            self.bridge.작업완료.emit(
+                "재시도",
+                {
+                    "retry": retry,
+                    "contact": contact,
+                    "sent": sent,
+                },
+            )
+        except Exception as e:
+            self.bridge.작업완료.emit("오류", str(e))
+
     def on_task_finished(self, kind, result):
         if kind == "업데이트확인":
             self.update_label.setText(result["text"])
@@ -610,6 +774,21 @@ class MainWindow(QMainWindow):
                 f"연락처 추가: {c['ready']}명\n연락처 실패: {c['failed']}명\n"
                 f"게시물 발송 성공: {s['success']}명\n게시물 발송 실패: {s['failed']}명"
             )
+        elif kind == "재시도":
+            retry = result["retry"]
+            c = result["contact"]
+            s = result["sent"]
+            QMessageBox.information(
+                self,
+                "실패건 재시도 완료",
+                f"원본 작업: #{retry['source_campaign_id']}\n"
+                f"재시도 작업: #{retry['campaign_id']} / {retry['retry_round']}차\n"
+                f"재시도 대상: {retry['count']}명\n"
+                f"연락처/UID 준비: {c['ready']}명\n"
+                f"재시도 발송 성공: {s['success']}명\n"
+                f"재시도 실패: {s['failed']}명\n"
+                f"잔여/보류: {s['remaining']}명"
+            )
         else:
             QMessageBox.critical(self, "작업 오류", str(result))
 
@@ -622,6 +801,7 @@ class MainWindow(QMainWindow):
                 "[대기] 생성된 작업이 없습니다.\n"
                 "[순서] 고객 DB 업로드 → 연락처 추가 → 게시물 발송"
             )
+            self._refresh_retry_button()
             return
 
         ready = self.db.fetchone(
@@ -632,13 +812,29 @@ class MainWindow(QMainWindow):
             "SELECT COUNT(*) c FROM campaign_recipients WHERE campaign_id=? AND status='MESSAGE_SENT'",
             (latest["id"],),
         )["c"]
+        failed_row = self.db.fetchone(
+            "SELECT COUNT(*) c FROM campaign_recipients "
+            "WHERE campaign_id=? AND status='FAILED'",
+            (latest["id"],),
+        )
+        failed = int(failed_row["c"] or 0) if failed_row else 0
+
+        retry_text = ""
+        if int(latest["retry_round"] or 0) > 0:
+            retry_text = (
+                f"\n[재시도] 원본 작업 #{latest['retry_of_campaign_id']} / "
+                f"{latest['retry_round']}차"
+            )
+
         self.work_status.setPlainText(
             f"[작업번호] {latest['id']}\n"
             f"[작업상태] {latest['status']}\n"
             f"[전체대상] {latest['total_count']}명\n"
-            f"[연락처 추가완료] {ready}명\n"
-            f"[게시물 발송완료] {sent}명"
+            f"[발송성공] {sent}명\n"
+            f"[실패] {failed}명"
+            f"{retry_text}"
         )
+        self._refresh_retry_button()
 
     def db_page(self):
         w = QWidget()
