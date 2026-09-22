@@ -162,3 +162,48 @@ class SessionService:
             "failed": failed,
             "skipped": skipped,
         }
+
+
+    def delete_account(self, account_id):
+        account = self.db.fetchone(
+            "SELECT * FROM telegram_accounts WHERE id=?",
+            (account_id,),
+        )
+        if not account:
+            raise RuntimeError("삭제할 계정을 찾을 수 없습니다.")
+
+        active = self.db.fetchone(
+            "SELECT COUNT(*) c FROM campaign_recipients "
+            "WHERE assigned_account_id=? "
+            "AND (contact_status IN ('WAITING','ADDING','CONTACT_PAUSED') "
+            "OR status IN ('ASSIGNED','SENDING','SEND_PAUSED'))",
+            (account_id,),
+        )
+        if active and int(active["c"] or 0) > 0:
+            raise RuntimeError("현재 작업에 배정된 계정이라 삭제할 수 없습니다. 작업 종료 후 삭제해주세요.")
+
+        session_path = Path(account["session_file"] or "")
+        self.db.execute(
+            "DELETE FROM telegram_accounts WHERE id=?",
+            (account_id,),
+        )
+
+        if session_path and session_path.exists():
+            try:
+                session_path.unlink()
+            except Exception as e:
+                self.logs.write(
+                    "WARNING",
+                    "ACCOUNT",
+                    f"계정 DB 삭제 완료 / 세션파일 삭제 실패: {type(e).__name__}: {e}",
+                    account_id=account_id,
+                )
+                return {"deleted": True, "session_deleted": False}
+
+        self.logs.write(
+            "INFO",
+            "ACCOUNT",
+            "등록 계정과 세션파일을 삭제했습니다.",
+            account_id=account_id,
+        )
+        return {"deleted": True, "session_deleted": True}
