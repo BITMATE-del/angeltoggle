@@ -636,7 +636,7 @@ class MainWindow(QMainWindow):
         l = QVBoxLayout(w)
         l.addWidget(self.title("텔레그램 계정", "C:\\엔젤토글> 세션 관리"))
 
-        b = QPushButton("[ 세션 ZIP 일괄등록 ]")
+        b = QPushButton("[ 세션 ZIP / SESSION 파일 등록 ]")
         b.clicked.connect(self.import_sessions)
         l.addWidget(b)
 
@@ -675,14 +675,28 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def import_sessions(self):
-        path, _ = QFileDialog.getOpenFileName(self, "세션 ZIP 선택", "", "ZIP (*.zip)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "텔레그램 세션 파일 선택",
+            "",
+            "텔레그램 세션 (*.zip *.session);;ZIP 압축 (*.zip);;SESSION 파일 (*.session)"
+        )
         if not path:
             return
+
         try:
-            s = self.session_import.import_zip(path)
+            if path.lower().endswith(".session"):
+                s = self.session_import.import_session_file(path)
+            else:
+                s = self.session_import.import_zip(path)
+
             QMessageBox.information(
-                self, "세션 등록 완료",
-                f"등록: {s['imported']}개\n건너뜀: {s['skipped']}개"
+                self,
+                "세션 등록 완료",
+                f"발견: {s.get('found', 0)}개\n"
+                f"등록: {s.get('imported', 0)}개\n"
+                f"동일 이름 자동변경: {s.get('renamed', 0)}개\n"
+                f"실패: {s.get('failed', 0)}개"
             )
             self.refresh_accounts()
             self.refresh_summary()
