@@ -342,7 +342,20 @@ class MainWindow(QMainWindow):
 
     def work_page(self):
         w = QWidget()
-        l = QVBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        l = QVBoxLayout(content)
+        l.setContentsMargins(10, 8, 10, 12)
+        l.setSpacing(10)
+
         l.addWidget(self.title("작업 실행", "C:\\엔젤토글> 연락처 추가 -> UID 확인 -> PostBot 발송"))
 
         info = QLabel(
@@ -350,12 +363,19 @@ class MainWindow(QMainWindow):
             "연락처 추가 → UID Resolve/중복확인 → PostBot Inline Query → 전송 → message_id 확인 순서로 표시됩니다."
         )
         info.setObjectName("상태패널")
+        info.setMinimumHeight(68)
+        info.setWordWrap(True)
         l.addWidget(info)
 
         progress_group = QGroupBox("현재 진행현황")
+        progress_group.setMinimumHeight(185)
         progress_layout = QVBoxLayout(progress_group)
+        progress_layout.setContentsMargins(10, 18, 10, 10)
+        progress_layout.setSpacing(10)
 
         cards = QHBoxLayout()
+        cards.setSpacing(7)
+
         self.progress_total = QLabel("전체 대상\n0")
         self.progress_contact = QLabel("연락처 완료\n0")
         self.progress_uid = QLabel("UID 확인\n0")
@@ -373,7 +393,9 @@ class MainWindow(QMainWindow):
         ]:
             card.setObjectName("진행카드")
             card.setAlignment(Qt.AlignCenter)
-            card.setMinimumHeight(62)
+            card.setMinimumHeight(76)
+            card.setMinimumWidth(110)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             cards.addWidget(card)
 
         progress_layout.addLayout(cards)
@@ -382,15 +404,24 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("진행률 0.0%")
+        self.progress_bar.setMinimumHeight(30)
+        self.progress_bar.setMaximumHeight(30)
         progress_layout.addWidget(self.progress_bar)
 
         detail_row = QHBoxLayout()
+        detail_row.setSpacing(14)
+
         self.progress_stage = QLabel("[현재 단계] 대기")
         self.progress_stage.setObjectName("보조")
+        self.progress_stage.setMinimumHeight(22)
+
         self.progress_accounts = QLabel("[작업 계정] 0개")
         self.progress_accounts.setObjectName("보조")
+        self.progress_accounts.setMinimumHeight(22)
+
         self.progress_points = QLabel("[포인트] 사용 0원 / 남은 예상 0원")
         self.progress_points.setObjectName("보조")
+        self.progress_points.setMinimumHeight(22)
 
         detail_row.addWidget(self.progress_stage, 2)
         detail_row.addWidget(self.progress_accounts, 1)
@@ -401,10 +432,12 @@ class MainWindow(QMainWindow):
 
         self.work_status = QTextEdit()
         self.work_status.setReadOnly(True)
-        self.work_status.setMaximumHeight(105)
+        self.work_status.setMinimumHeight(92)
+        self.work_status.setMaximumHeight(115)
         l.addWidget(self.work_status)
 
         action_row = QHBoxLayout()
+        action_row.setSpacing(8)
 
         self.contact_button = QPushButton("[ 1단계 · 연락처 추가 시작 ]")
         self.contact_button.setMinimumHeight(48)
@@ -424,6 +457,8 @@ class MainWindow(QMainWindow):
         l.addLayout(action_row)
 
         retry_row = QHBoxLayout()
+        retry_row.setSpacing(8)
+
         self.retry_failed_button = QPushButton("[ 실패 0건만 다시 재시도 ]")
         self.retry_failed_button.setMinimumHeight(48)
         self.retry_failed_button.setEnabled(False)
@@ -431,17 +466,23 @@ class MainWindow(QMainWindow):
 
         self.retry_history_label = QLabel("[재시도 이력] 없음")
         self.retry_history_label.setObjectName("보조")
+        self.retry_history_label.setMinimumHeight(28)
+        self.retry_history_label.setWordWrap(True)
 
         retry_row.addWidget(self.retry_failed_button)
         retry_row.addWidget(self.retry_history_label, 1)
         l.addLayout(retry_row)
 
         sector_group = QGroupBox("병렬 진행창 관리")
+        sector_group.setMinimumHeight(175)
         sector_layout = QVBoxLayout(sector_group)
+        sector_layout.setContentsMargins(10, 18, 10, 10)
+        sector_layout.setSpacing(8)
 
         sector_top = QHBoxLayout()
         self.sector_summary = QLabel("진행창 정보를 불러오는 중입니다.")
         self.sector_summary.setObjectName("보조")
+        self.sector_summary.setMinimumHeight(32)
 
         add_sector = QPushButton("[ 진행창 추가 ]")
         add_sector.clicked.connect(self.add_progress_sector)
@@ -455,17 +496,22 @@ class MainWindow(QMainWindow):
         sector_layout.addLayout(sector_top)
 
         self.sector_tabs = QTabWidget()
-        self.sector_tabs.setMaximumHeight(150)
+        self.sector_tabs.setMinimumHeight(100)
+        self.sector_tabs.setMaximumHeight(135)
         sector_layout.addWidget(self.sector_tabs)
 
         l.addWidget(sector_group)
 
         live_group = QGroupBox("실시간 작업 진행 로그")
+        live_group.setMinimumHeight(260)
         live_layout = QVBoxLayout(live_group)
+        live_layout.setContentsMargins(10, 18, 10, 10)
+        live_layout.setSpacing(8)
 
         live_top = QHBoxLayout()
         self.work_live_state = QLabel("[ 대기 ] 작업을 시작하면 진행 상황이 표시됩니다.")
         self.work_live_state.setObjectName("보조")
+        self.work_live_state.setMinimumHeight(30)
 
         clear_live = QPushButton("[ 로그 지우기 ]")
         clear_live.clicked.connect(self.clear_work_live_log)
@@ -477,12 +523,17 @@ class MainWindow(QMainWindow):
         self.work_live_log = QTextEdit()
         self.work_live_log.setReadOnly(True)
         self.work_live_log.setFont(QFont("Consolas", 10))
+        self.work_live_log.setMinimumHeight(185)
         self.work_live_log.setPlainText(
             "[대기] 발송 시작 버튼을 누르면 이 화면에서 실시간 로그를 확인할 수 있습니다."
         )
         live_layout.addWidget(self.work_live_log)
 
-        l.addWidget(live_group, 1)
+        l.addWidget(live_group)
+        l.addStretch(1)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         return w
 
     def refresh_live_progress(self):
