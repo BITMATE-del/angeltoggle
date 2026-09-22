@@ -147,6 +147,28 @@ class TelegramService:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("CONTACT_ADD_FAILED", name)
 
+    async def resolve_imported_user(self, client, user):
+        try:
+            peer = await client.get_input_entity(user)
+            uid = int(getattr(peer, "user_id", 0) or getattr(user, "id", 0) or 0)
+            if not uid:
+                raise RecipientError("UID_RESOLVE_FAILED", "Telegram UID를 확인하지 못했습니다.")
+            return {
+                "uid": uid,
+                "username": getattr(user, "username", None),
+                "peer": peer,
+            }
+        except RecipientError:
+            raise
+        except errors.FloodWaitError as e:
+            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
+        except errors.PeerFloodError as e:
+            raise AccountWorkerError("PEER_FLOOD", str(e))
+        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
+            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
+        except Exception as e:
+            raise RecipientError("UID_RESOLVE_FAILED", type(e).__name__)
+
     async def current_contact_ids(self, client):
         try:
             contacts = await client.get_contacts()
@@ -197,6 +219,50 @@ class TelegramService:
             if "Flood" in name or "AuthKey" in name or "Session" in name:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("POSTBOT_CHECK_FAILED", name)
+
+    async def send_postbot_inline(self, client, peer, bot_username, post_value):
+        bot_username = (bot_username or "@PostBot").strip()
+        if not bot_username.startswith("@"):
+            bot_username = "@" + bot_username
+
+        post_code = normalize_post_code(post_value)
+        if not post_code:
+            raise RecipientError("POSTBOT_INVALID_CODE", "PostBot 게시물 코드가 비어 있습니다.")
+
+        try:
+            results = await client.inline_query(bot_username, post_code)
+            if not results:
+                raise RecipientError("POSTBOT_RESULT_NOT_FOUND", "PostBot 인라인 결과가 없습니다.")
+
+            message = await results[0].click(peer)
+            message_id = getattr(message, "id", None)
+            if not message_id:
+                raise RecipientError(
+                    "MESSAGE_SEND_FAILED",
+                    "Telegram API에서 Message ID를 확인하지 못했습니다."
+                )
+
+            return {
+                "message_id": str(message_id),
+                "post_code": post_code,
+                "result_count": len(results),
+            }
+
+        except RecipientError:
+            raise
+        except errors.FloodWaitError as e:
+            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
+        except errors.PeerFloodError as e:
+            raise AccountWorkerError("PEER_FLOOD", str(e))
+        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
+            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
+        except errors.UserPrivacyRestrictedError as e:
+            raise RecipientError("PRIVACY_RESTRICTED", type(e).__name__)
+        except Exception as e:
+            name = type(e).__name__
+            if "Flood" in name or "AuthKey" in name or "Session" in name:
+                raise AccountWorkerError("ACCOUNT_ERROR", name)
+            raise RecipientError("MESSAGE_SEND_FAILED", name)
 
     async def prepare_postbot_source(self, client, bot_username, post_value):
         bot_username = (bot_username or "@PostBot").strip()
