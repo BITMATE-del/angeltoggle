@@ -799,9 +799,37 @@ class MainWindow(QMainWindow):
             "SELECT COUNT(*) c FROM telegram_accounts WHERE enabled=1 "
             "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED')"
         )["c"]
-        pending = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE status='PENDING'")["c"]
+
+        pending = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE status IN ('PENDING','REASSIGN_WAITING')"
+        )["c"]
+
+        latest = self.send_engine.latest_campaign()
+        assigned_ready = 0
+        if latest and latest["status"] in (
+            "CONTACT_WAITING",
+            "CONTACT_RUNNING",
+            "CONTACT_DONE",
+            "SEND_RUNNING",
+            "PARTIAL",
+        ):
+            row = self.db.fetchone(
+                "SELECT COUNT(*) c FROM campaign_recipients "
+                "WHERE campaign_id=? "
+                "AND status!='MESSAGE_SENT' "
+                "AND contact_status IN ('WAITING','ADDING','ADDED','CONTACT_PAUSED')",
+                (latest["id"],),
+            )
+            assigned_ready = int(row["c"] or 0) if row else 0
+
         post_ok = bool(self.db.get_setting("postbot_link"))
-        checks = [("텔레그램 API", api_ok), ("사용 가능한 계정", accounts > 0), ("고객 DB", pending > 0)]
+        customer_db_ok = int(pending or 0) > 0 or assigned_ready > 0
+
+        checks = [
+            ("텔레그램 API", api_ok),
+            ("사용 가능한 계정", accounts > 0),
+            ("고객 DB", customer_db_ok),
+        ]
         if need_post:
             checks.append(("PostBot 게시물", post_ok))
         return checks
