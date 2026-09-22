@@ -12,7 +12,7 @@ DefaultGroupName=AngelToggle
 DisableProgramGroupPage=yes
 OutputDir=..\installer_output
 OutputBaseFilename=AngelToggle-Setup
-Compression=lzma2/ultra64
+Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
@@ -27,7 +27,7 @@ SetupLogging=yes
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "추가 아이콘:"; Flags: unchecked
+Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "추가 아이콘:"
 
 [Files]
 Source: "..\dist\AngelToggle\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
