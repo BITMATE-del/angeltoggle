@@ -102,6 +102,143 @@ class SendEngine:
         )
         return campaign_id
 
+    def create_failed_retry_campaign(self, source_campaign_id, bot_username, post_code):
+        source = self.db.fetchone(
+            "SELECT * FROM campaigns WHERE id=?",
+            (source_campaign_id,),
+        )
+        if not source:
+            raise RuntimeError("재시도할 원본 작업을 찾을 수 없습니다.")
+
+        accounts = self._accounts()
+        if not accounts:
+            raise RuntimeError("재시도에 사용할 정상 텔레그램 계정이 없습니다.")
+
+        failed_rows = self.db.fetchall(
+            "SELECT cr.recipient_id,cr.status,cr.error_code,cr.error_message,r.phone "
+            "FROM campaign_recipients cr "
+            "JOIN recipients r ON r.id=cr.recipient_id "
+            "WHERE cr.campaign_id=? "
+            "AND cr.status='FAILED' "
+            "AND r.status='FAILED' "
+            "ORDER BY cr.recipient_id",
+            (source_campaign_id,),
+        )
+        if not failed_rows:
+            raise RuntimeError("재시도할 실패 DB가 없습니다.")
+
+        max_per = int(self.db.get_setting("max_contacts_per_account", "40") or 40)
+        capacity = len(accounts) * max_per
+        chosen = failed_rows[:capacity]
+        if not chosen:
+            raise RuntimeError("현재 계정 용량으로 재시도할 DB가 없습니다.")
+
+        previous_round = int(source["retry_round"] or 0)
+        retry_round = previous_round + 1
+
+        campaign_id = self.db.execute(
+            "INSERT INTO campaigns("
+            "name,postbot_username,post_code,status,total_count,retry_of_campaign_id,retry_round"
+            ") VALUES(?,?,?,'CONTACT_WAITING',?,?,?)",
+            (
+                f"재시도_{source_campaign_id}_{retry_round}",
+                bot_username,
+                post_code,
+                len(chosen),
+                source_campaign_id,
+                retry_round,
+            ),
+        )
+
+        with self.db.connection() as conn:
+            idx = 0
+            for account in accounts:
+                for _ in range(max_per):
+                    if idx >= len(chosen):
+                        break
+
+                    row = chosen[idx]
+                    recipient_id = row["recipient_id"]
+
+                    conn.execute(
+                        "UPDATE recipients SET "
+                        "assigned_account_id=?,status='ASSIGNED',contact_status='NOT_ADDED',"
+                        "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                        "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                        "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                        "updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=? AND status='FAILED'",
+                        (account["id"], recipient_id),
+                    )
+
+                    conn.execute(
+                        "INSERT INTO campaign_recipients("
+                        "campaign_id,recipient_id,assigned_account_id,status,contact_status,"
+                        "error_code,error_message,telegram_message_id"
+                        ") VALUES(?,?,?,'ASSIGNED','WAITING',NULL,NULL,NULL)",
+                        (campaign_id, recipient_id, account["id"]),
+                    )
+
+                    conn.execute(
+                        "INSERT INTO retry_history("
+                        "recipient_id,source_campaign_id,retry_campaign_id,retry_round,"
+                        "previous_status,previous_error_code,previous_error_message,result_status"
+                        ") VALUES(?,?,?,?,?,?,?,'RETRY_WAITING')",
+                        (
+                            recipient_id,
+                            source_campaign_id,
+                            campaign_id,
+                            retry_round,
+                            row["status"],
+                            row["error_code"],
+                            row["error_message"],
+                        ),
+                    )
+                    idx += 1
+
+        self.logs.write(
+            "INFO",
+            "재시도",
+            f"실패 DB 전용 재시도 작업 #{campaign_id} 생성 / "
+            f"원본 작업 #{source_campaign_id} / 대상 {len(chosen)}명 / 재시도 {retry_round}차",
+            campaign_id=campaign_id,
+        )
+        return {
+            "campaign_id": campaign_id,
+            "count": len(chosen),
+            "retry_round": retry_round,
+            "source_campaign_id": source_campaign_id,
+        }
+
+    def _sync_retry_history(self, campaign_id):
+        campaign = self.db.fetchone(
+            "SELECT retry_of_campaign_id,retry_round FROM campaigns WHERE id=?",
+            (campaign_id,),
+        )
+        if not campaign or campaign["retry_of_campaign_id"] is None:
+            return
+
+        rows = self.db.fetchall(
+            "SELECT recipient_id,status,error_code,error_message "
+            "FROM campaign_recipients WHERE campaign_id=?",
+            (campaign_id,),
+        )
+
+        with self.db.connection() as conn:
+            for row in rows:
+                conn.execute(
+                    "UPDATE retry_history SET result_status=?,result_error_code=?,"
+                    "result_error_message=?,updated_at=CURRENT_TIMESTAMP "
+                    "WHERE retry_campaign_id=? AND recipient_id=?",
+                    (
+                        row["status"],
+                        row["error_code"],
+                        row["error_message"],
+                        campaign_id,
+                        row["recipient_id"],
+                    ),
+                )
+
     def reset_failed_recipients(self):
         rows = self.db.fetchall(
             "SELECT id,contact_status,assigned_account_id FROM recipients "
@@ -290,6 +427,7 @@ class SendEngine:
             f"추가 완료된 {ready}명은 바로 게시물 발송 가능합니다.",
             campaign_id=campaign_id,
         )
+        self._sync_retry_history(campaign_id)
         return {"ready": ready, "failed": failed, "paused": paused}
 
     def _contact_thread(self, campaign_id, account_id):
@@ -544,6 +682,7 @@ class SendEngine:
             f"게시물 발송 종료 / 성공 {success}명 / 실패 {failed}명 / 보류 {remaining}명",
             campaign_id=campaign_id,
         )
+        self._sync_retry_history(campaign_id)
         return {"success": success, "failed": failed, "remaining": remaining}
 
     def _send_thread(self, campaign_id, account_id):
