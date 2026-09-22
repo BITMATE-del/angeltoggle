@@ -603,8 +603,12 @@ class MainWindow(QMainWindow):
         retry_failed = QPushButton("[ 실패 DB 다시 대기상태로 ]")
         retry_failed.clicked.connect(self.reset_failed_db)
 
+        unassign_db = QPushButton("[ 배정된 DB 다시 대기상태로 ]")
+        unassign_db.clicked.connect(self.reset_assigned_db)
+
         db_buttons.addWidget(b)
         db_buttons.addWidget(retry_failed)
+        db_buttons.addWidget(unassign_db)
         l.addLayout(db_buttons)
 
         self.db_result = QLabel("업로드된 파일이 없습니다.")
@@ -747,6 +751,55 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "실패 DB 복구 오류", str(e))
+
+    def reset_assigned_db(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "연락처 추가/발송 작업이 실행 중일 때는 배정 DB를 되돌릴 수 없습니다."
+            )
+            return
+
+        active = self.db.fetchone(
+            "SELECT COUNT(*) c FROM campaign_recipients cr "
+            "JOIN recipients r ON r.id=cr.recipient_id "
+            "WHERE cr.status!='MESSAGE_SENT' AND r.status!='MESSAGE_SENT'"
+        )
+        count = int(active["c"] or 0) if active else 0
+
+        if count <= 0:
+            QMessageBox.information(
+                self,
+                "배정 DB 복구",
+                "다시 대기상태로 돌릴 배정 DB가 없습니다."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "배정 DB 복구",
+            f"현재 배정된 미완료 DB {count}건을 전부 배정취소하고 대기상태로 돌리시겠습니까?\n\n"
+            "이미 MESSAGE_SENT 완료된 DB와 완료 이력은 유지됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            cancelled = self.send_engine.cancel_active_assignments()
+            self.refresh_summary()
+            self.refresh_work_status()
+            self.refresh_completion_log()
+            self.refresh_accounts()
+            QMessageBox.information(
+                self,
+                "배정 DB 복구 완료",
+                f"배정된 미완료 DB {cancelled}건을 다시 대기상태로 변경했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "배정 DB 복구 오류", str(e))
 
     def postbot_page(self):
         w = QWidget()
@@ -1052,19 +1105,12 @@ class MainWindow(QMainWindow):
                 account_ids=account_ids
             )
 
-        deleted = 0
-        session_failed = 0
-
-        for account_id in account_ids:
-            result = self.session_import.delete_account(account_id)
-            if result.get("deleted"):
-                deleted += 1
-            if not result.get("session_deleted"):
-                session_failed += 1
+        batch = self.session_import.delete_accounts_batch(account_ids)
 
         return {
-            "deleted": deleted,
-            "session_failed": session_failed,
+            "deleted": int(batch.get("deleted", 0) or 0),
+            "session_failed": int(batch.get("session_failed", 0) or 0),
+            "missing": int(batch.get("missing", 0) or 0),
             "unassigned": unassigned,
         }
 
@@ -1104,6 +1150,8 @@ class MainWindow(QMainWindow):
                 msg += f"\n진행 중 배정 {result['unassigned']}건을 취소했습니다."
             if result["session_failed"]:
                 msg += f"\n세션파일 {result['session_failed']}개는 삭제하지 못했습니다."
+            if result.get("missing"):
+                msg += f"\n이미 없던 계정 {result['missing']}개"
 
             QMessageBox.information(self, "계정 삭제 완료", msg)
         except Exception as e:
@@ -1142,6 +1190,8 @@ class MainWindow(QMainWindow):
                 msg += f"\n진행 중 배정 {result['unassigned']}건을 취소했습니다."
             if result["session_failed"]:
                 msg += f"\n세션파일 {result['session_failed']}개는 삭제하지 못했습니다."
+            if result.get("missing"):
+                msg += f"\n이미 없던 계정 {result['missing']}개"
 
             QMessageBox.information(self, "일괄 삭제 완료", msg)
         except Exception as e:
