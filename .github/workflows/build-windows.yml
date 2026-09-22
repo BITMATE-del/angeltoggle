@@ -41,10 +41,35 @@ jobs:
       - name: Build stable onedir application
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name "AngelToggle" --hidden-import pyexpat --collect-submodules xml main.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name "AngelToggle" --hidden-import pyexpat --collect-submodules xml --collect-all PySide6 --collect-all shiboken6 main.py
           if (-not (Test-Path dist\AngelToggle\AngelToggle.exe)) { throw "AngelToggle.exe missing from app build" }
-          $expat = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter pyexpat.pyd | Select-Object -First 1
+
+      - name: Verify Qt runtime files
+        shell: pwsh
+        run: |
+          $root = "dist\AngelToggle"
+          $required = @(
+            "_internal\PySide6\QtWidgets.pyd",
+            "_internal\PySide6\Qt\bin\Qt6Widgets.dll",
+            "_internal\PySide6\Qt\plugins\platforms\qwindows.dll"
+          )
+          foreach ($rel in $required) {
+            $p = Join-Path $root $rel
+            if (-not (Test-Path $p)) {
+              Write-Host "Expected path missing: $p"
+              Get-ChildItem -Path $root -Recurse -Filter "*QtWidgets*" | ForEach-Object { Write-Host $_.FullName }
+              Get-ChildItem -Path $root -Recurse -Filter "qwindows.dll" | ForEach-Object { Write-Host $_.FullName }
+              throw "Required Qt runtime file missing: $rel"
+            }
+          }
+          $expat = Get-ChildItem -Path $root -Recurse -Filter pyexpat.pyd | Select-Object -First 1
           if (-not $expat) { throw "pyexpat.pyd missing from onedir build" }
+
+      - name: Add Microsoft VC runtime installer
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "dist\AngelToggle\vc_redist.x64.exe"
+          if ((Get-Item "dist\AngelToggle\vc_redist.x64.exe").Length -lt 1000000) { throw "VC redistributable download failed" }
 
       - name: Smoke test onedir application
         shell: pwsh
@@ -84,4 +109,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v" + $env:APP_VERSION
-          gh release create $tag release\AngelToggle.exe AngelToggle-Windows.zip --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Backwards-compatible launcher plus stable onedir application"
+          gh release create $tag release\AngelToggle.exe AngelToggle-Windows.zip --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Qt-complete package with Microsoft VC runtime bootstrap"
