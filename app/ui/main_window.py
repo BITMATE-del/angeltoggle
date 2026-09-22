@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
         stats = self.db.fetchone(
             "SELECT "
             "COUNT(*) total, "
-            "SUM(CASE WHEN contact_status='ADDED' THEN 1 ELSE 0 END) contact_done, "
+            "SUM(CASE WHEN cr.contact_status='ADDED' THEN 1 ELSE 0 END) contact_done, "
             "SUM(CASE WHEN r.telegram_uid IS NOT NULL AND r.telegram_uid!='' THEN 1 ELSE 0 END) uid_done, "
             "SUM(CASE WHEN cr.status='MESSAGE_SENT' THEN 1 ELSE 0 END) sent, "
             "SUM(CASE WHEN cr.status='FAILED' OR cr.contact_status='FAILED' THEN 1 ELSE 0 END) failed, "
@@ -634,8 +634,8 @@ class MainWindow(QMainWindow):
             "SELECT COUNT(DISTINCT assigned_account_id) c "
             "FROM campaign_recipients "
             "WHERE campaign_id=? "
-            "AND (status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
-            "OR contact_status IN ('WAITING','ADDING','CONTACT_PAUSED'))",
+            "AND (campaign_recipients.status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
+            "OR campaign_recipients.contact_status IN ('WAITING','ADDING','CONTACT_PAUSED'))",
             (campaign_id,),
         )
         active_accounts = int(account_row["c"] or 0) if account_row else 0
@@ -694,10 +694,10 @@ class MainWindow(QMainWindow):
                 marks = ",".join("?" for _ in ids)
                 stats = self.db.fetchone(
                     "SELECT "
-                    "SUM(CASE WHEN status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
-                    "OR contact_status IN ('WAITING','ADDING','CONTACT_PAUSED') THEN 1 ELSE 0 END) working,"
-                    "SUM(CASE WHEN status='MESSAGE_SENT' THEN 1 ELSE 0 END) sent,"
-                    "SUM(CASE WHEN status='FAILED' OR contact_status='FAILED' THEN 1 ELSE 0 END) failed "
+                    "SUM(CASE WHEN campaign_recipients.status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
+                    "OR campaign_recipients.contact_status IN ('WAITING','ADDING','CONTACT_PAUSED') THEN 1 ELSE 0 END) working,"
+                    "SUM(CASE WHEN campaign_recipients.status='MESSAGE_SENT' THEN 1 ELSE 0 END) sent,"
+                    "SUM(CASE WHEN campaign_recipients.status='FAILED' OR campaign_recipients.contact_status='FAILED' THEN 1 ELSE 0 END) failed "
                     f"FROM campaign_recipients WHERE campaign_id=? "
                     f"AND assigned_account_id IN ({marks})",
                     (campaign_id, *ids),
