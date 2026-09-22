@@ -570,7 +570,7 @@ class MainWindow(QMainWindow):
         l = QVBoxLayout(w)
         l.addWidget(self.title("고객 DB", "C:\\엔젤토글> DB 업로드 및 중복 검수"))
 
-        b = QPushButton("[ Excel 고객 DB 업로드 ]")
+        b = QPushButton("[ 고객 DB 업로드 · Excel / TXT ]")
         b.clicked.connect(self.import_db)
         l.addWidget(b)
 
@@ -585,12 +585,17 @@ class MainWindow(QMainWindow):
         return w
 
     def import_db(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Excel 고객 DB 선택", "", "Excel (*.xlsx)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "고객 DB 파일 선택",
+            "",
+            "고객 DB (*.xlsx *.txt);;Excel (*.xlsx);;텍스트 (*.txt)"
+        )
         if not path:
             return
 
         try:
-            s = self.db_import.import_xlsx(path)
+            s = self.db_import.import_file(path)
             self.db_result.setText(
                 f"[업로드 완료]\n"
                 f"전체: {s['total']}명\n"
