@@ -207,3 +207,86 @@ class SessionService:
             account_id=account_id,
         )
         return {"deleted": True, "session_deleted": True}
+
+
+    def delete_accounts_batch(self, account_ids):
+        account_ids = sorted({int(x) for x in (account_ids or [])})
+        if not account_ids:
+            return {
+                "requested": 0,
+                "deleted": 0,
+                "missing": 0,
+                "session_deleted": 0,
+                "session_failed": 0,
+                "failed_files": [],
+            }
+
+        marks = ",".join("?" for _ in account_ids)
+        accounts = self.db.fetchall(
+            f"SELECT id,name,session_file FROM telegram_accounts "
+            f"WHERE id IN ({marks}) ORDER BY id",
+            tuple(account_ids),
+        )
+
+        found_ids = {int(row["id"]) for row in accounts}
+        missing = len(account_ids) - len(found_ids)
+
+        active = self.db.fetchone(
+            f"SELECT COUNT(*) c FROM campaign_recipients "
+            f"WHERE assigned_account_id IN ({marks}) "
+            f"AND status!='MESSAGE_SENT'",
+            tuple(account_ids),
+        )
+        active_count = int(active["c"] or 0) if active else 0
+        if active_count > 0:
+            raise RuntimeError(
+                f"선택한 계정에 진행 중 배정 {active_count}건이 남아 있습니다. "
+                "먼저 배정취소 후 다시 삭제해주세요."
+            )
+
+        if accounts:
+            delete_marks = ",".join("?" for _ in accounts)
+            ids_to_delete = tuple(int(row["id"]) for row in accounts)
+            with self.db.connection() as conn:
+                conn.execute(
+                    f"DELETE FROM telegram_accounts WHERE id IN ({delete_marks})",
+                    ids_to_delete,
+                )
+
+        session_deleted = 0
+        session_failed = 0
+        failed_files = []
+
+        for account in accounts:
+            session_path = Path(account["session_file"] or "")
+            if not session_path or not session_path.exists():
+                continue
+
+            try:
+                session_path.unlink()
+                session_deleted += 1
+            except Exception as e:
+                session_failed += 1
+                failed_files.append(str(session_path))
+                self.logs.write(
+                    "WARNING",
+                    "ACCOUNT",
+                    f"일괄 삭제 중 세션파일 삭제 실패: {session_path} / {type(e).__name__}: {e}",
+                    account_id=account["id"],
+                )
+
+        self.logs.write(
+            "INFO",
+            "ACCOUNT",
+            f"계정 일괄 삭제 완료 / 요청 {len(account_ids)} / 삭제 {len(accounts)} / "
+            f"세션삭제 {session_deleted} / 세션실패 {session_failed} / 미존재 {missing}",
+        )
+
+        return {
+            "requested": len(account_ids),
+            "deleted": len(accounts),
+            "missing": missing,
+            "session_deleted": session_deleted,
+            "session_failed": session_failed,
+            "failed_files": failed_files,
+        }
