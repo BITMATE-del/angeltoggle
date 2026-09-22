@@ -589,6 +589,7 @@ class MainWindow(QMainWindow):
         self.refresh_work_status()
         self.refresh_accounts()
         self.refresh_completion_log()
+        self.refresh_db_status_tabs()
 
         if kind == "연락처":
             QMessageBox.information(
@@ -642,7 +643,7 @@ class MainWindow(QMainWindow):
     def db_page(self):
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(self.title("고객 DB", "C:\\엔젤토글> DB 업로드 및 중복 검수"))
+        l.addWidget(self.title("고객 DB", "C:\\엔젤토글> DB 상태별 관리"))
 
         db_buttons = QHBoxLayout()
 
@@ -655,22 +656,208 @@ class MainWindow(QMainWindow):
         unassign_db = QPushButton("[ 배정된 DB 다시 대기상태로 ]")
         unassign_db.clicked.connect(self.reset_assigned_db)
 
+        refresh = QPushButton("[ DB 상태 새로고침 ]")
+        refresh.clicked.connect(self.refresh_db_status_tabs)
+
         db_buttons.addWidget(b)
         db_buttons.addWidget(retry_failed)
         db_buttons.addWidget(unassign_db)
+        db_buttons.addWidget(refresh)
         l.addLayout(db_buttons)
 
-        self.db_result = QLabel("업로드된 파일이 없습니다.")
+        self.db_result = QLabel("DB 상태를 불러오는 중입니다.")
         self.db_result.setObjectName("상태패널")
         l.addWidget(self.db_result)
 
-        self.db_table = QTableWidget(0, 4)
-        self.db_table.setHorizontalHeaderLabels(["번호", "원본 번호", "변환 번호", "상태"])
-        self.db_table.horizontalHeader().setStretchLastSection(True)
-        self.db_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.db_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        l.addWidget(self.db_table)
+        self.db_tabs = QTabWidget()
+        self.db_status_tables = {}
+
+        tab_defs = [
+            ("대기 DB", "pending"),
+            ("배정된 DB", "assigned"),
+            ("진행중 DB", "running"),
+            ("진행완료 DB", "completed"),
+            ("실패 DB", "failed"),
+            ("크리티컬 잔여 DB", "critical"),
+            ("최근 업로드", "upload"),
+        ]
+
+        for label, key in tab_defs:
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+
+            table = QTableWidget(0, 8 if key != "upload" else 4)
+
+            if key == "upload":
+                table.setHorizontalHeaderLabels([
+                    "번호", "원본 번호", "변환 번호", "상태"
+                ])
+            else:
+                table.setHorizontalHeaderLabels([
+                    "DB",
+                    "전화번호",
+                    "담당 계정",
+                    "DB 상태",
+                    "연락처 상태",
+                    "Telegram UID",
+                    "마지막 오류",
+                    "최근 변경",
+                ])
+
+            table.horizontalHeader().setStretchLastSection(True)
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+            page_layout.addWidget(table)
+            self.db_status_tables[key] = table
+            self.db_tabs.addTab(page, label)
+
+        self.db_table = self.db_status_tables["upload"]
+        l.addWidget(self.db_tabs, 1)
+
+        QTimer.singleShot(0, self.refresh_db_status_tabs)
         return w
+
+    def _db_status_rows(self, kind):
+        base_select = (
+            "SELECT r.id,r.phone,r.normalized_phone,r.status,r.contact_status,"
+            "r.telegram_uid,r.error_code,r.error_message,r.updated_at,"
+            "a.name account_name,a.phone account_phone "
+            "FROM recipients r "
+            "LEFT JOIN telegram_accounts a ON a.id=r.assigned_account_id "
+        )
+
+        if kind == "pending":
+            sql = base_select + (
+                "WHERE r.status='PENDING' "
+                "AND r.assigned_account_id IS NULL "
+                "ORDER BY r.id"
+            )
+            return self.db.fetchall(sql)
+
+        if kind == "completed":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='MESSAGE_SENT' ORDER BY r.id"
+            )
+
+        if kind == "failed":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='FAILED' ORDER BY r.id"
+            )
+
+        if kind == "critical":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='UNCERTAIN' "
+                "OR EXISTS ("
+                "SELECT 1 FROM campaign_recipients cr "
+                "WHERE cr.recipient_id=r.id "
+                "AND (cr.status IN ('SEND_PAUSED','UNCERTAIN') "
+                "OR cr.contact_status IN ('CONTACT_PAUSED','CONTACT_UNCERTAIN'))"
+                ") "
+                "ORDER BY r.id"
+            )
+
+        if kind == "running":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.status='SENDING' "
+                "OR EXISTS ("
+                "SELECT 1 FROM campaign_recipients cr "
+                "WHERE cr.recipient_id=r.id "
+                "AND (cr.status='SENDING' OR cr.contact_status='ADDING')"
+                ") "
+                "ORDER BY r.id"
+            )
+
+        if kind == "assigned":
+            return self.db.fetchall(
+                base_select +
+                "WHERE r.assigned_account_id IS NOT NULL "
+                "AND r.status NOT IN ('MESSAGE_SENT','FAILED','UNCERTAIN','SENDING') "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM campaign_recipients cr "
+                "WHERE cr.recipient_id=r.id "
+                "AND (cr.status IN ('SENDING','SEND_PAUSED','UNCERTAIN') "
+                "OR cr.contact_status IN ('ADDING','CONTACT_PAUSED','CONTACT_UNCERTAIN'))"
+                ") "
+                "ORDER BY r.id"
+            )
+
+        return []
+
+    def refresh_db_status_tabs(self):
+        if not hasattr(self, "db_status_tables"):
+            return
+
+        counts = {}
+
+        for kind in ["pending", "assigned", "running", "completed", "failed", "critical"]:
+            rows = self._db_status_rows(kind)
+            counts[kind] = len(rows)
+
+            table = self.db_status_tables[kind]
+            table.setRowCount(len(rows))
+
+            for index, row in enumerate(rows):
+                account_text = row["account_phone"] or row["account_name"] or ""
+                error_text = " / ".join(
+                    x for x in [
+                        row["error_code"] or "",
+                        row["error_message"] or "",
+                    ] if x
+                )
+
+                values = [
+                    f"DB{row['id']}",
+                    row["phone"] or row["normalized_phone"] or "",
+                    account_text,
+                    row["status"] or "",
+                    row["contact_status"] or "",
+                    row["telegram_uid"] or "",
+                    error_text,
+                    row["updated_at"] or "",
+                ]
+
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if kind in ("failed", "critical"):
+                        item.setForeground(QColor(255, 100, 100))
+                    elif kind == "completed":
+                        item.setForeground(QColor(110, 255, 150))
+                    self.db_status_tables[kind].setItem(index, col, item)
+
+            table.resizeColumnsToContents()
+
+        labels = {
+            "pending": "대기 DB",
+            "assigned": "배정된 DB",
+            "running": "진행중 DB",
+            "completed": "진행완료 DB",
+            "failed": "실패 DB",
+            "critical": "크리티컬 잔여 DB",
+        }
+
+        key_order = ["pending", "assigned", "running", "completed", "failed", "critical", "upload"]
+        for tab_index, key in enumerate(key_order):
+            if key == "upload":
+                self.db_tabs.setTabText(tab_index, "최근 업로드")
+            else:
+                self.db_tabs.setTabText(
+                    tab_index,
+                    f"{labels[key]} ({counts.get(key, 0)})"
+                )
+
+        self.db_result.setText(
+            f"[대기] {counts.get('pending', 0)}명   |   "
+            f"[배정] {counts.get('assigned', 0)}명   |   "
+            f"[진행중] {counts.get('running', 0)}명   |   "
+            f"[완료] {counts.get('completed', 0)}명   |   "
+            f"[실패] {counts.get('failed', 0)}명   |   "
+            f"[크리티컬 잔여] {counts.get('critical', 0)}명"
+        )
 
     def show_imported_db_rows(self, import_id):
         rows = self.db_import.get_import_rows(import_id)
@@ -700,6 +887,7 @@ class MainWindow(QMainWindow):
                 self.db_table.setItem(idx, col, item)
 
         self.db_table.resizeColumnsToContents()
+        self.db_tabs.setCurrentIndex(6)
 
     def import_db(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -761,6 +949,7 @@ class MainWindow(QMainWindow):
                     )
 
             self.refresh_summary()
+            self.refresh_db_status_tabs()
         except Exception as e:
             QMessageBox.critical(self, "DB 업로드 오류", str(e))
 
@@ -793,6 +982,7 @@ class MainWindow(QMainWindow):
             restored = self.send_engine.reset_failed_recipients()
             self.refresh_summary()
             self.refresh_work_status()
+            self.refresh_db_status_tabs()
             QMessageBox.information(
                 self,
                 "복구 완료",
@@ -842,6 +1032,7 @@ class MainWindow(QMainWindow):
             self.refresh_work_status()
             self.refresh_completion_log()
             self.refresh_accounts()
+            self.refresh_db_status_tabs()
             QMessageBox.information(
                 self,
                 "배정 DB 복구 완료",
