@@ -1,4 +1,5 @@
 import re
+from app.core.phone_utils import to_telegram_e164, format_korean_international
 from telethon import TelegramClient, errors, functions, types
 
 class RecipientError(Exception):
@@ -92,9 +93,10 @@ class TelegramService:
         for recipient_id, phone in targets:
             client_id = int(recipient_id)
             ids[client_id] = recipient_id
+            converted_phone = phone_to_e164(phone)
             contacts.append(types.InputPhoneContact(
                 client_id=client_id,
-                phone=phone_to_e164(phone),
+                phone=converted_phone,
                 first_name="Customer",
                 last_name="",
             ))
