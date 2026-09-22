@@ -4,7 +4,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -53,7 +52,7 @@ def download(url,target):
         url,
         headers={"User-Agent":"AngelToggle-Launcher","Accept":"application/octet-stream"},
     )
-    with urllib.request.urlopen(req,timeout=120) as res,open(target,"wb") as f:
+    with urllib.request.urlopen(req,timeout=180) as res,open(target,"wb") as f:
         while True:
             chunk=res.read(1024*1024)
             if not chunk:
@@ -77,6 +76,16 @@ def install_zip(zip_path,root,version):
     if not exe.exists():
         raise RuntimeError("업데이트 압축파일 내부에서 AngelToggle.exe를 찾을 수 없습니다.")
 
+    required = [
+        source/"_internal"/"PySide6"/"QtWidgets.pyd",
+        source/"_internal"/"PySide6"/"Qt"/"bin"/"Qt6Widgets.dll",
+        source/"_internal"/"PySide6"/"Qt"/"plugins"/"platforms"/"qwindows.dll",
+        source/"vc_redist.x64.exe",
+    ]
+    missing=[str(p.relative_to(source)) for p in required if not p.exists()]
+    if missing:
+        raise RuntimeError("설치파일 구성요소가 누락되었습니다: " + ", ".join(missing))
+
     old=root/"app_old"
     if old.exists():
         shutil.rmtree(old,ignore_errors=True)
@@ -95,25 +104,58 @@ def install_zip(zip_path,root,version):
 
     return app_dir/"AngelToggle.exe"
 
+def ensure_vc_runtime(root,app_dir):
+    marker=root/"vc_runtime_installed.txt"
+    if marker.exists():
+        return
+
+    installer=app_dir/"vc_redist.x64.exe"
+    if not installer.exists():
+        raise RuntimeError("Visual C++ 런타임 설치파일이 없습니다.")
+
+    creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+    try:
+        result=subprocess.run(
+            [str(installer),"/install","/quiet","/norestart"],
+            cwd=str(app_dir),
+            creationflags=creationflags,
+            timeout=180,
+            check=False,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Visual C++ 런타임 설치 실패: {e}")
+
+    # Microsoft installer success/reboot/already-installed style result codes.
+    if result.returncode not in (0, 1638, 3010):
+        raise RuntimeError(
+            f"Visual C++ 런타임 설치가 완료되지 않았습니다. 오류코드: {result.returncode}"
+        )
+
+    marker.write_text("ok",encoding="utf-8")
+
 def main():
     root=root_dir()
     app_dir=root/"app"
     target=app_dir/"AngelToggle.exe"
 
-    try:
-        latest,url=release_info()
-        current=installed_version(app_dir)
-        if (not target.exists()) or version_tuple(latest)>version_tuple(current):
-            update_dir=root/"update"
-            update_dir.mkdir(parents=True,exist_ok=True)
-            zip_path=update_dir/"AngelToggle-Windows.zip"
-            if zip_path.exists():
-                zip_path.unlink()
-            download(url,zip_path)
-            target=install_zip(zip_path,root,latest)
-    except Exception:
-        if not target.exists():
-            raise
+    latest,url=release_info()
+    current=installed_version(app_dir)
+
+    if (not target.exists()) or version_tuple(latest)>version_tuple(current):
+        update_dir=root/"update"
+        update_dir.mkdir(parents=True,exist_ok=True)
+        zip_path=update_dir/"AngelToggle-Windows.zip"
+        if zip_path.exists():
+            zip_path.unlink()
+        download(url,zip_path)
+        target=install_zip(zip_path,root,latest)
+        app_dir=target.parent
+        # New package may ship a newer redistributable; re-check once after update.
+        marker=root/"vc_runtime_installed.txt"
+        if marker.exists():
+            marker.unlink()
+
+    ensure_vc_runtime(root,app_dir)
 
     subprocess.Popen([str(target)],cwd=str(target.parent))
 
@@ -125,6 +167,6 @@ if __name__=="__main__":
         ctypes.windll.user32.MessageBoxW(
             0,
             str(e),
-            "엔젤토글 업데이트 오류",
+            "엔젤토글 실행 오류",
             0x10
         )
