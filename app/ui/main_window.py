@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
         self.refresh_summary()
         self.refresh_accounts()
         self.refresh_work_status()
+        self.refresh_point_balance_async()
 
     def _license_badge_text(self):
         remaining = self.license_info.get("remaining_days")
@@ -273,6 +274,8 @@ class MainWindow(QMainWindow):
         expires_at = self._format_license_expiry(self.license_info.get("expires_at"))
         offline = "오프라인 유예" if self.license_info.get("offline") else "서버 인증"
         remaining_text = f"{remaining}일" if remaining is not None else "확인 필요"
+        point_balance = int(self.license_info.get("point_balance_krw") or 0)
+        unit_price = int(self.license_info.get("send_unit_price_krw") or 10)
 
         self.summary.setText(
             f"[등록 계정]       {ac:>7}개\n"
@@ -280,6 +283,7 @@ class MainWindow(QMainWindow):
             f"[사용 가능 DB]    {pending:>7}명\n"
             f"[연락처 추가완료] {added:>7}명\n"
             f"[게시물 발송완료] {sent:>7}명\n"
+            f"[발송포인트]      {point_balance:>7,}원 · 건당 {unit_price}원\n"
             f"[라이선스]        {remaining_text:>7} 남음\n"
             f"[만료일]          {expires_at}\n"
             f"[인증상태]        {offline}\n\n"
@@ -722,6 +726,12 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        if kind == "포인트잔액":
+            self.license_info["point_balance_krw"] = int(result.get("balance_krw") or 0)
+            self.license_info["send_unit_price_krw"] = int(result.get("unit_price_krw") or 10)
+            self.refresh_summary()
+            return
+
         if kind == "포스트봇체크":
             if result.get("ok"):
                 info = result.get("result") or {}
@@ -750,6 +760,7 @@ class MainWindow(QMainWindow):
             else:
                 self.work_live_state.setText("[ 완료 ] 작업이 종료되었습니다.")
         self.refresh_summary()
+        self.refresh_point_balance_async()
         self.refresh_work_status()
         self.refresh_accounts()
         self.refresh_completion_log()
@@ -1897,6 +1908,22 @@ class MainWindow(QMainWindow):
                         self.work_live_state.setText("[ 진행중 · 성공 응답 확인 ]")
                     else:
                         self.work_live_state.setText("[ 진행중 ] 실시간 처리 중...")
+
+    def refresh_point_balance_async(self):
+        def worker():
+            try:
+                point = self.send_engine.points.balance()
+                self.bridge.작업완료.emit(
+                    "포인트잔액",
+                    {
+                        "balance_krw": point["balance_krw"],
+                        "unit_price_krw": point["unit_price_krw"],
+                    },
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def settings_page(self):
         w = QWidget()
