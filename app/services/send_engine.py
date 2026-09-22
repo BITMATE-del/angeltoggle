@@ -68,6 +68,8 @@ class SendEngine:
             "SELECT DISTINCT a.* FROM telegram_accounts a "
             "JOIN campaign_recipients cr ON cr.assigned_account_id=a.id "
             "WHERE cr.campaign_id=? AND cr.contact_status IN ('WAITING','CONTACT_PAUSED') "
+            "AND a.enabled=1 "
+            "AND a.status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED','WORKER_ERROR') "
             "ORDER BY a.id",
             (campaign_id,),
         )
@@ -125,7 +127,22 @@ class SendEngine:
         return {"ready": ready, "failed": failed, "paused": paused}
 
     def _contact_thread(self, campaign_id, account_id):
-        asyncio.run(self._run_contact_account(campaign_id, account_id))
+        try:
+            asyncio.run(self._run_contact_account(campaign_id, account_id))
+        except Exception as e:
+            self._pause_contact_account(
+                campaign_id,
+                account_id,
+                "WORKER_ERROR",
+                f"{type(e).__name__}: {e}",
+            )
+            self.logs.write(
+                "ERROR",
+                "연락처",
+                f"계정 Worker 예외 격리 / 다른 계정은 계속 실행: {type(e).__name__}: {e}",
+                account_id=account_id,
+                campaign_id=campaign_id,
+            )
 
     async def _run_contact_account(self, campaign_id, account_id):
         account = self.db.fetchone("SELECT * FROM telegram_accounts WHERE id=?", (account_id,))
@@ -259,7 +276,10 @@ class SendEngine:
             "SELECT DISTINCT a.* FROM telegram_accounts a "
             "JOIN campaign_recipients cr ON cr.assigned_account_id=a.id "
             "WHERE cr.campaign_id=? AND cr.contact_status='ADDED' "
-            "AND cr.status IN ('ASSIGNED','SEND_PAUSED') ORDER BY a.id",
+            "AND cr.status IN ('ASSIGNED','SEND_PAUSED') "
+            "AND a.enabled=1 "
+            "AND a.status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED','WORKER_ERROR') "
+            "ORDER BY a.id",
             (campaign_id,),
         )
         ready = self.db.fetchone(
@@ -324,7 +344,22 @@ class SendEngine:
         return {"success": success, "failed": failed, "remaining": remaining}
 
     def _send_thread(self, campaign_id, account_id):
-        asyncio.run(self._run_send_account(campaign_id, account_id))
+        try:
+            asyncio.run(self._run_send_account(campaign_id, account_id))
+        except Exception as e:
+            self._pause_send_account(
+                campaign_id,
+                account_id,
+                "WORKER_ERROR",
+                f"{type(e).__name__}: {e}",
+            )
+            self.logs.write(
+                "ERROR",
+                "발송",
+                f"계정 Worker 예외 격리 / 다른 계정은 계속 실행: {type(e).__name__}: {e}",
+                account_id=account_id,
+                campaign_id=campaign_id,
+            )
 
     async def _run_send_account(self, campaign_id, account_id):
         account = self.db.fetchone("SELECT * FROM telegram_accounts WHERE id=?", (account_id,))
