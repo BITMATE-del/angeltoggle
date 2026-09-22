@@ -1,7 +1,10 @@
 import json
+import os
 import re
-import webbrowser
+import subprocess
+import tempfile
 import urllib.request
+from pathlib import Path
 
 try:
     from app.version import VERSION
@@ -53,18 +56,72 @@ class UpdateService:
             "installer_size": installer_size,
         }
 
-    def open_installer_download(self, installer_url):
+    def download_installer(self, installer_url, latest_version=None):
         if not installer_url:
             raise RuntimeError("최신 설치마법사 주소를 찾을 수 없습니다.")
 
-        opened = webbrowser.open(installer_url, new=2)
-        if not opened:
-            raise RuntimeError("브라우저를 열 수 없습니다.")
+        base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "AngelToggle" / "update"
+        base.mkdir(parents=True, exist_ok=True)
+
+        version = (latest_version or "latest").strip()
+        target = base / f"AngelToggle-Setup-{version}.exe"
+        temp = base / f"AngelToggle-Setup-{version}.download"
+
+        try:
+            temp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        req = urllib.request.Request(
+            installer_url,
+            headers={
+                "User-Agent": "AngelToggle-Installer-Downloader",
+                "Accept": "application/octet-stream",
+            },
+        )
+
+        downloaded = 0
+        with urllib.request.urlopen(req, timeout=180) as response, open(temp, "wb") as f:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+
+        if not temp.exists() or temp.stat().st_size < 5 * 1024 * 1024:
+            raise RuntimeError("설치마법사 다운로드가 정상적으로 완료되지 않았습니다.")
+
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        temp.replace(target)
 
         if self.logs:
             self.logs.write(
                 "INFO",
                 "업데이트",
-                "최신 설치마법사 다운로드 페이지를 열었습니다.",
+                f"설치마법사 다운로드 완료 / {downloaded // (1024 * 1024)}MB / {target.name}",
+            )
+
+        return str(target)
+
+    def launch_installer(self, installer_path):
+        path = Path(installer_path)
+        if not path.exists():
+            raise RuntimeError("다운로드한 설치마법사를 찾을 수 없습니다.")
+
+        subprocess.Popen(
+            [str(path)],
+            cwd=str(path.parent),
+            close_fds=True,
+        )
+
+        if self.logs:
+            self.logs.write(
+                "INFO",
+                "업데이트",
+                "최신 설치마법사를 실행했습니다.",
             )
         return True
