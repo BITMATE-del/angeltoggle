@@ -138,6 +138,8 @@ class MainWindow(QMainWindow):
 
         self.worker_thread = None
         self.current_campaign_id = None
+        self.latest_installer_info = None
+        self.update_installing = False
 
         self.setWindowTitle("엔젤토글")
         self.setMinimumSize(1160, 740)
@@ -465,18 +467,48 @@ class MainWindow(QMainWindow):
         if kind == "업데이트확인":
             self.update_label.setText(result["text"])
             info = result.get("info") or {}
+            self.latest_installer_info = info
+
             if hasattr(self, "update_button"):
                 if info.get("available") and info.get("installer_url"):
-                    self.update_button.setText("[ 최신 설치마법사 받기 ]")
-                    try:
-                        self.update_button.clicked.disconnect()
-                    except Exception:
-                        pass
-                    self.update_button.clicked.connect(
-                        lambda: self.open_latest_installer(info.get("installer_url"))
+                    self.update_button.setText(
+                        f"[ 최신버전 {info.get('latest')} 다운로드 및 설치 ]"
                     )
+                    self.update_button.setEnabled(True)
                 else:
-                    self.update_button.setText("[ 최신 설치마법사 확인 ]")
+                    self.update_button.setText("[ 업데이트 확인 ]")
+                    self.update_button.setEnabled(True)
+            return
+
+        if kind == "설치마법사다운로드":
+            self.update_installing = False
+            if result.get("ok"):
+                self.update_label.setText(
+                    "최신 설치마법사 다운로드 완료 / 설치마법사를 실행합니다."
+                )
+                try:
+                    self.update_service.launch_installer(result["path"])
+                    QMessageBox.information(
+                        self,
+                        "업데이트 설치",
+                        "최신 설치마법사를 실행했습니다.\n"
+                        "현재 엔젤토글을 종료하고 설치를 계속합니다."
+                    )
+                    QApplication.instance().quit()
+                except Exception as e:
+                    self.update_button.setEnabled(True)
+                    self.update_label.setText(f"설치마법사 실행 실패: {e}")
+                    QMessageBox.critical(self, "업데이트 오류", str(e))
+            else:
+                self.update_button.setEnabled(True)
+                self.update_label.setText(
+                    "설치마법사 다운로드 실패: " + result.get("error", "알 수 없는 오류")
+                )
+                QMessageBox.critical(
+                    self,
+                    "업데이트 다운로드 실패",
+                    result.get("error", "알 수 없는 오류"),
+                )
             return
 
         self._set_busy(False)
@@ -793,8 +825,8 @@ class MainWindow(QMainWindow):
         ul = QVBoxLayout(update_group)
         self.update_label = QLabel("새 버전은 설치마법사로 업데이트합니다.")
         self.update_label.setObjectName("보조")
-        self.update_button = QPushButton("[ 최신 설치마법사 확인 ]")
-        self.update_button.clicked.connect(self.manual_update_check)
+        self.update_button = QPushButton("[ 업데이트 확인 ]")
+        self.update_button.clicked.connect(self.update_button_clicked)
         ul.addWidget(self.update_label)
         ul.addWidget(self.update_button)
         l.addWidget(update_group)
@@ -812,8 +844,19 @@ class MainWindow(QMainWindow):
         self.logs.write("INFO", "설정", f"계정당 최대 연락처 {self.max_contacts.value()}명으로 저장")
         QMessageBox.information(self, "저장 완료", "연락처 작업 설정을 저장했습니다.")
 
+    def update_button_clicked(self):
+        info = self.latest_installer_info or {}
+        if info.get("available") and info.get("installer_url"):
+            self.start_installer_update()
+        else:
+            self.manual_update_check()
+
     def manual_update_check(self):
-        self.update_label.setText("최신 설치마법사 확인 중...")
+        if self.update_installing:
+            return
+        self.update_label.setText("최신 버전 확인 중...")
+        if hasattr(self, "update_button"):
+            self.update_button.setEnabled(False)
         threading.Thread(target=self._update_check_worker, daemon=True).start()
 
     def _update_check_worker(self):
@@ -823,12 +866,12 @@ class MainWindow(QMainWindow):
                 if info.get("available"):
                     text = (
                         f"현재 버전 {info['current']} / 최신 버전 {info['latest']} "
-                        f"/ 새 설치마법사가 있습니다."
+                        f"/ 업데이트 가능"
                     )
                 else:
                     text = (
                         f"현재 버전 {info['current']} / 최신 버전 {info['latest']} "
-                        f"/ 최신 상태입니다."
+                        f"/ 최신 버전입니다."
                     )
             else:
                 text = f"현재 버전 {info['current']} / 최신 버전 확인 실패"
@@ -839,14 +882,43 @@ class MainWindow(QMainWindow):
                 {"text": f"업데이트 확인 실패: {e}", "info": None},
             )
 
-    def open_latest_installer(self, installer_url):
-        try:
-            self.update_service.open_installer_download(installer_url)
-            QMessageBox.information(
+    def start_installer_update(self):
+        if self.update_installing:
+            return
+
+        info = self.latest_installer_info or {}
+        url = info.get("installer_url")
+        latest = info.get("latest")
+        if not url:
+            QMessageBox.warning(
                 self,
-                "설치마법사 다운로드",
-                "브라우저에서 최신 AngelToggle-Setup.exe 다운로드를 시작했습니다.\n"
-                "다운로드가 끝나면 실행해서 기존 설치 위에 업데이트하세요."
+                "업데이트 확인",
+                "최신 설치마법사 정보를 먼저 확인해주세요.",
+            )
+            self.manual_update_check()
+            return
+
+        self.update_installing = True
+        self.update_button.setEnabled(False)
+        self.update_label.setText(
+            f"최신 버전 {latest} 설치마법사를 다운로드하고 있습니다..."
+        )
+
+        threading.Thread(
+            target=self._download_installer_worker,
+            args=(url, latest),
+            daemon=True,
+        ).start()
+
+    def _download_installer_worker(self, url, latest):
+        try:
+            path = self.update_service.download_installer(url, latest)
+            self.bridge.작업완료.emit(
+                "설치마법사다운로드",
+                {"ok": True, "path": path},
             )
         except Exception as e:
-            QMessageBox.critical(self, "설치마법사 열기 실패", str(e))
+            self.bridge.작업완료.emit(
+                "설치마법사다운로드",
+                {"ok": False, "error": str(e)},
+            )
