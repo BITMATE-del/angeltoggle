@@ -119,6 +119,27 @@ QFrame#콘솔패널 {
     border: 1px solid #173A27;
     border-radius: 10px;
 }
+QLabel#진행카드 {
+    background-color: #07100B;
+    border: 1px solid #1C5A33;
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: #BFFFD0;
+    font-weight: 700;
+}
+QProgressBar {
+    background-color: #020403;
+    color: #D9FFE7;
+    border: 1px solid #1C5A33;
+    border-radius: 7px;
+    text-align: center;
+    min-height: 24px;
+    font-weight: 800;
+}
+QProgressBar::chunk {
+    background-color: #1BAF55;
+    border-radius: 6px;
+}
 """
 
 
@@ -209,6 +230,10 @@ class MainWindow(QMainWindow):
         self.refresh_accounts()
         self.refresh_work_status()
         self.refresh_point_balance_async()
+
+        self.progress_timer = QTimer(self)
+        self.progress_timer.timeout.connect(self.refresh_live_progress)
+        self.progress_timer.start(800)
 
     def _license_badge_text(self):
         remaining = self.license_info.get("remaining_days")
@@ -302,6 +327,53 @@ class MainWindow(QMainWindow):
         info.setObjectName("상태패널")
         l.addWidget(info)
 
+        progress_group = QGroupBox("현재 진행현황")
+        progress_layout = QVBoxLayout(progress_group)
+
+        cards = QHBoxLayout()
+        self.progress_total = QLabel("전체 대상\n0")
+        self.progress_contact = QLabel("연락처 완료\n0")
+        self.progress_uid = QLabel("UID 확인\n0")
+        self.progress_sent = QLabel("발송 성공\n0")
+        self.progress_failed = QLabel("실패\n0")
+        self.progress_remaining = QLabel("잔여/보류\n0")
+
+        for card in [
+            self.progress_total,
+            self.progress_contact,
+            self.progress_uid,
+            self.progress_sent,
+            self.progress_failed,
+            self.progress_remaining,
+        ]:
+            card.setObjectName("진행카드")
+            card.setAlignment(Qt.AlignCenter)
+            card.setMinimumHeight(62)
+            cards.addWidget(card)
+
+        progress_layout.addLayout(cards)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("진행률 0.0%")
+        progress_layout.addWidget(self.progress_bar)
+
+        detail_row = QHBoxLayout()
+        self.progress_stage = QLabel("[현재 단계] 대기")
+        self.progress_stage.setObjectName("보조")
+        self.progress_accounts = QLabel("[작업 계정] 0개")
+        self.progress_accounts.setObjectName("보조")
+        self.progress_points = QLabel("[포인트] 사용 0원 / 남은 예상 0원")
+        self.progress_points.setObjectName("보조")
+
+        detail_row.addWidget(self.progress_stage, 2)
+        detail_row.addWidget(self.progress_accounts, 1)
+        detail_row.addWidget(self.progress_points, 2)
+        progress_layout.addLayout(detail_row)
+
+        l.addWidget(progress_group)
+
         self.work_status = QTextEdit()
         self.work_status.setReadOnly(True)
         self.work_status.setMaximumHeight(105)
@@ -364,6 +436,92 @@ class MainWindow(QMainWindow):
         l.addWidget(live_group, 1)
         return w
 
+    def refresh_live_progress(self):
+        if not hasattr(self, "progress_bar"):
+            return
+
+        campaign = None
+        if self.current_campaign_id:
+            campaign = self.db.fetchone(
+                "SELECT * FROM campaigns WHERE id=?",
+                (self.current_campaign_id,),
+            )
+        if not campaign:
+            campaign = self.send_engine.latest_campaign()
+        if not campaign:
+            return
+
+        campaign_id = int(campaign["id"])
+        stats = self.db.fetchone(
+            "SELECT "
+            "COUNT(*) total, "
+            "SUM(CASE WHEN contact_status='ADDED' THEN 1 ELSE 0 END) contact_done, "
+            "SUM(CASE WHEN r.telegram_uid IS NOT NULL AND r.telegram_uid!='' THEN 1 ELSE 0 END) uid_done, "
+            "SUM(CASE WHEN cr.status='MESSAGE_SENT' THEN 1 ELSE 0 END) sent, "
+            "SUM(CASE WHEN cr.status='FAILED' OR cr.contact_status='FAILED' THEN 1 ELSE 0 END) failed, "
+            "SUM(CASE WHEN cr.status IN ('ASSIGNED','SENDING','SEND_PAUSED','UNCERTAIN') "
+            "OR cr.contact_status IN ('WAITING','ADDING','CONTACT_PAUSED','CONTACT_UNCERTAIN') THEN 1 ELSE 0 END) remaining "
+            "FROM campaign_recipients cr "
+            "JOIN recipients r ON r.id=cr.recipient_id "
+            "WHERE cr.campaign_id=?",
+            (campaign_id,),
+        )
+
+        total = int(stats["total"] or 0)
+        contact_done = int(stats["contact_done"] or 0)
+        uid_done = int(stats["uid_done"] or 0)
+        sent = int(stats["sent"] or 0)
+        failed = int(stats["failed"] or 0)
+        remaining = max(0, total - sent - failed)
+
+        if total > 0:
+            progress = min(100.0, ((sent + failed) / total) * 100.0)
+        else:
+            progress = 0.0
+
+        self.progress_total.setText(f"전체 대상\n{total:,}")
+        self.progress_contact.setText(f"연락처 완료\n{contact_done:,}")
+        self.progress_uid.setText(f"UID 확인\n{uid_done:,}")
+        self.progress_sent.setText(f"발송 성공\n{sent:,}")
+        self.progress_failed.setText(f"실패\n{failed:,}")
+        self.progress_remaining.setText(f"잔여/보류\n{remaining:,}")
+
+        self.progress_bar.setValue(int(progress * 10))
+        self.progress_bar.setFormat(f"진행률 {progress:.1f}% · {sent + failed:,}/{total:,} 처리")
+
+        status = str(campaign["status"] or "")
+        stage_map = {
+            "CONTACT_WAITING": "연락처 추가 대기",
+            "CONTACT_RUNNING": "연락처 추가 + UID 확인 중",
+            "CONTACT_DONE": "연락처/UID 준비 완료",
+            "SEND_RUNNING": "PostBot 게시물 발송 중",
+            "COMPLETED": "작업 완료",
+            "PARTIAL": "일부 완료 · 잔여 확인 필요",
+            "CANCELLED": "작업 취소",
+        }
+        self.progress_stage.setText(
+            f"[현재 단계] {stage_map.get(status, status or '대기')} · 작업 #{campaign_id}"
+        )
+
+        account_row = self.db.fetchone(
+            "SELECT COUNT(DISTINCT assigned_account_id) c "
+            "FROM campaign_recipients "
+            "WHERE campaign_id=? "
+            "AND (status IN ('ASSIGNED','SENDING','SEND_PAUSED') "
+            "OR contact_status IN ('WAITING','ADDING','CONTACT_PAUSED'))",
+            (campaign_id,),
+        )
+        active_accounts = int(account_row["c"] or 0) if account_row else 0
+        self.progress_accounts.setText(f"[작업 계정] {active_accounts}개")
+
+        unit_price = int(self.license_info.get("send_unit_price_krw") or 10)
+        used_points = sent * unit_price
+        remaining_send = max(0, total - sent - failed)
+        expected_points = remaining_send * unit_price
+        self.progress_points.setText(
+            f"[포인트] 사용 {used_points:,}원 / 남은 예상 {expected_points:,}원"
+        )
+
     def clear_work_live_log(self):
         if hasattr(self, "work_live_log"):
             self.work_live_log.clear()
@@ -382,6 +540,7 @@ class MainWindow(QMainWindow):
             f"[안내] 실제 처리 결과가 아래에 실시간으로 표시됩니다."
         )
         self.work_live_state.setText(f"[ 실행중 ] {title}{suffix}")
+        self.refresh_live_progress()
         bar = self.work_live_log.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -765,6 +924,7 @@ class MainWindow(QMainWindow):
         self.refresh_accounts()
         self.refresh_completion_log()
         self.refresh_db_status_tabs()
+        self.refresh_live_progress()
 
         if kind == "연락처":
             QMessageBox.information(
