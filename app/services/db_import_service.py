@@ -249,3 +249,35 @@ class DBImportService:
             "WHERE import_id=? ORDER BY id",
             (import_id,),
         )
+
+
+    def get_import_rows(self, import_id):
+        rows = []
+
+        normal = self.db.fetchall(
+            "SELECT id,phone,normalized_phone,status FROM recipients "
+            "WHERE import_id=? ORDER BY id",
+            (import_id,),
+        )
+        for row in normal:
+            rows.append({
+                "phone": row["phone"],
+                "normalized_phone": row["normalized_phone"],
+                "type": "NORMAL",
+                "reason": "",
+            })
+
+        duplicates = self.db.fetchall(
+            "SELECT id,raw_phone,normalized_phone,reason,processed,approved "
+            "FROM import_duplicates WHERE import_id=? ORDER BY id",
+            (import_id,),
+        )
+        for row in duplicates:
+            rows.append({
+                "phone": row["raw_phone"],
+                "normalized_phone": row["normalized_phone"],
+                "type": "DUPLICATE",
+                "reason": row["reason"],
+            })
+
+        return rows
