@@ -317,9 +317,31 @@ class MainWindow(QMainWindow):
     def refresh_summary(self):
         ac = self.db.fetchone("SELECT COUNT(*) c FROM telegram_accounts")["c"]
         rc = self.db.fetchone("SELECT COUNT(*) c FROM recipients")["c"]
-        pending = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE status='PENDING'")["c"]
-        added = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE contact_status='ADDED'")["c"]
-        sent = self.db.fetchone("SELECT COUNT(*) c FROM recipients WHERE status='MESSAGE_SENT'")["c"]
+        pending = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE status='PENDING'"
+        )["c"]
+        assigned = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients "
+            "WHERE status IN ('ASSIGNED','SENDING','SEND_PAUSED')"
+        )["c"]
+        reassign_waiting = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE status='REASSIGN_WAITING'"
+        )["c"]
+        manual_check = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients "
+            "WHERE status IN ('REASSIGN_BLOCKED','UNCERTAIN')"
+        )["c"]
+        final_failed = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients "
+            "WHERE status IN ('FAILED','FAILED_FINAL')"
+        )["c"]
+        added = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE contact_status='ADDED'"
+        )["c"]
+        sent = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients WHERE status='MESSAGE_SENT'"
+        )["c"]
+        unsent = max(0, int(rc or 0) - int(sent or 0))
         remaining = self.license_info.get("remaining_days")
         expires_at = self._format_license_expiry(self.license_info.get("expires_at"))
         offline = "오프라인 유예" if self.license_info.get("offline") else "서버 인증"
@@ -330,7 +352,12 @@ class MainWindow(QMainWindow):
         self.summary.setText(
             f"[등록 계정]       {ac:>7}개\n"
             f"[전체 고객 DB]    {rc:>7}명\n"
-            f"[사용 가능 DB]    {pending:>7}명\n"
+            f"[미발송 DB]       {unsent:>7}명\n"
+            f"[즉시 대기 DB]    {pending:>7}명\n"
+            f"[배정/진행 DB]    {assigned:>7}명\n"
+            f"[재배정 대기]     {reassign_waiting:>7}명\n"
+            f"[수동 확인]       {manual_check:>7}명\n"
+            f"[실패/최종실패]   {final_failed:>7}명\n"
             f"[연락처 추가완료] {added:>7}명\n"
             f"[게시물 발송완료] {sent:>7}명\n"
             f"[발송포인트]      {point_balance:>7,}원 · 건당 {unit_price}원\n"
