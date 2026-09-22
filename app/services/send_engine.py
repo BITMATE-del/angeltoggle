@@ -30,7 +30,9 @@ class SendEngine:
 
         with self.db.connection() as conn:
             for idx, account in enumerate(accounts):
-                sector = (idx // 10) + 1
+                # 진행창을 추가하면 계정을 균등하게 다시 배치한다.
+                # configured는 항상 ceil(account_count/10) 이상이므로 진행창당 최대 10개를 넘지 않는다.
+                sector = (idx % configured) + 1
                 conn.execute(
                     "UPDATE telegram_accounts SET worker_sector=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                     (sector, account["id"]),
@@ -182,8 +184,13 @@ class SendEngine:
         if not accounts:
             raise RuntimeError("재시도에 사용할 정상 텔레그램 계정이 없습니다.")
 
+        account_map = {int(a["id"]): a for a in accounts}
+
         failed_rows = self.db.fetchall(
-            "SELECT cr.recipient_id,cr.status,cr.error_code,cr.error_message,r.phone "
+            "SELECT "
+            "cr.recipient_id,cr.assigned_account_id,cr.status,cr.contact_status,"
+            "cr.error_code,cr.error_message,"
+            "r.phone,r.telegram_uid,r.telegram_username,r.contact_name,r.contact_added_at "
             "FROM campaign_recipients cr "
             "JOIN recipients r ON r.id=cr.recipient_id "
             "WHERE cr.campaign_id=? "
@@ -196,10 +203,42 @@ class SendEngine:
             raise RuntimeError("재시도할 실패 DB가 없습니다.")
 
         max_per = int(self.db.get_setting("max_contacts_per_account", "40") or 40)
-        capacity = len(accounts) * max_per
-        chosen = failed_rows[:capacity]
-        if not chosen:
-            raise RuntimeError("현재 계정 용량으로 재시도할 DB가 없습니다.")
+        capacities = {int(a["id"]): max_per for a in accounts}
+
+        preserved = []
+        needs_contact = []
+
+        for row in failed_rows:
+            old_account_id = int(row["assigned_account_id"] or 0)
+            contact_ready = (
+                row["contact_status"] == "ADDED"
+                and bool(str(row["telegram_uid"] or "").strip())
+                and old_account_id in account_map
+            )
+
+            if contact_ready:
+                # 이미 이 Telegram 계정의 연락처에 추가된 DB는
+                # 같은 계정을 그대로 사용하고 연락처 추가/UID Resolve를 다시 하지 않는다.
+                preserved.append((row, old_account_id))
+            else:
+                needs_contact.append(row)
+
+        assigned_new = []
+        for row in needs_contact:
+            target_id = None
+            for account in accounts:
+                aid = int(account["id"])
+                if capacities.get(aid, 0) > 0:
+                    target_id = aid
+                    break
+            if target_id is None:
+                break
+            capacities[target_id] -= 1
+            assigned_new.append((row, target_id))
+
+        chosen_count = len(preserved) + len(assigned_new)
+        if chosen_count <= 0:
+            raise RuntimeError("현재 계정 상태로 재시도할 실패 DB가 없습니다.")
 
         previous_round = int(source["retry_round"] or 0)
         retry_round = previous_round + 1
@@ -212,68 +251,107 @@ class SendEngine:
                 f"재시도_{source_campaign_id}_{retry_round}",
                 bot_username,
                 post_code,
-                len(chosen),
+                chosen_count,
                 source_campaign_id,
                 retry_round,
             ),
         )
 
         with self.db.connection() as conn:
-            idx = 0
-            for account in accounts:
-                for _ in range(max_per):
-                    if idx >= len(chosen):
-                        break
+            for row, account_id in preserved:
+                recipient_id = row["recipient_id"]
 
-                    row = chosen[idx]
-                    recipient_id = row["recipient_id"]
+                conn.execute(
+                    "UPDATE recipients SET "
+                    "assigned_account_id=?,status='ASSIGNED',contact_status='ADDED',"
+                    "error_code=NULL,error_message=NULL,telegram_message_id=NULL,"
+                    "processed_at=NULL,sent_at=NULL,updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status='FAILED'",
+                    (account_id, recipient_id),
+                )
 
-                    conn.execute(
-                        "UPDATE recipients SET "
-                        "assigned_account_id=?,status='ASSIGNED',contact_status='NOT_ADDED',"
-                        "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
-                        "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
-                        "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
-                        "updated_at=CURRENT_TIMESTAMP "
-                        "WHERE id=? AND status='FAILED'",
-                        (account["id"], recipient_id),
-                    )
+                conn.execute(
+                    "INSERT INTO campaign_recipients("
+                    "campaign_id,recipient_id,assigned_account_id,status,contact_status,"
+                    "contact_added_at,error_code,error_message,telegram_message_id"
+                    ") VALUES(?,?,?,'ASSIGNED','ADDED',?,NULL,NULL,NULL)",
+                    (
+                        campaign_id,
+                        recipient_id,
+                        account_id,
+                        row["contact_added_at"],
+                    ),
+                )
 
-                    conn.execute(
-                        "INSERT INTO campaign_recipients("
-                        "campaign_id,recipient_id,assigned_account_id,status,contact_status,"
-                        "error_code,error_message,telegram_message_id"
-                        ") VALUES(?,?,?,'ASSIGNED','WAITING',NULL,NULL,NULL)",
-                        (campaign_id, recipient_id, account["id"]),
-                    )
+                conn.execute(
+                    "INSERT INTO retry_history("
+                    "recipient_id,source_campaign_id,retry_campaign_id,retry_round,"
+                    "previous_status,previous_error_code,previous_error_message,result_status"
+                    ") VALUES(?,?,?,?,?,?,?,'RETRY_WAITING')",
+                    (
+                        recipient_id,
+                        source_campaign_id,
+                        campaign_id,
+                        retry_round,
+                        row["status"],
+                        row["error_code"],
+                        row["error_message"],
+                    ),
+                )
 
-                    conn.execute(
-                        "INSERT INTO retry_history("
-                        "recipient_id,source_campaign_id,retry_campaign_id,retry_round,"
-                        "previous_status,previous_error_code,previous_error_message,result_status"
-                        ") VALUES(?,?,?,?,?,?,?,'RETRY_WAITING')",
-                        (
-                            recipient_id,
-                            source_campaign_id,
-                            campaign_id,
-                            retry_round,
-                            row["status"],
-                            row["error_code"],
-                            row["error_message"],
-                        ),
-                    )
-                    idx += 1
+            for row, account_id in assigned_new:
+                recipient_id = row["recipient_id"]
+
+                conn.execute(
+                    "UPDATE recipients SET "
+                    "assigned_account_id=?,status='ASSIGNED',contact_status='NOT_ADDED',"
+                    "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                    "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                    "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                    "updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status='FAILED'",
+                    (account_id, recipient_id),
+                )
+
+                conn.execute(
+                    "INSERT INTO campaign_recipients("
+                    "campaign_id,recipient_id,assigned_account_id,status,contact_status,"
+                    "error_code,error_message,telegram_message_id"
+                    ") VALUES(?,?,?,'ASSIGNED','WAITING',NULL,NULL,NULL)",
+                    (campaign_id, recipient_id, account_id),
+                )
+
+                conn.execute(
+                    "INSERT INTO retry_history("
+                    "recipient_id,source_campaign_id,retry_campaign_id,retry_round,"
+                    "previous_status,previous_error_code,previous_error_message,result_status"
+                    ") VALUES(?,?,?,?,?,?,?,'RETRY_WAITING')",
+                    (
+                        recipient_id,
+                        source_campaign_id,
+                        campaign_id,
+                        retry_round,
+                        row["status"],
+                        row["error_code"],
+                        row["error_message"],
+                    ),
+                )
 
         self.logs.write(
             "INFO",
             "재시도",
             f"실패 DB 전용 재시도 작업 #{campaign_id} 생성 / "
-            f"원본 작업 #{source_campaign_id} / 대상 {len(chosen)}명 / 재시도 {retry_round}차",
+            f"원본 작업 #{source_campaign_id} / 대상 {chosen_count}명 / "
+            f"연락처 재사용 {len(preserved)}명 / 연락처 재처리 {len(assigned_new)}명 / "
+            f"재시도 {retry_round}차",
             campaign_id=campaign_id,
         )
+
         return {
             "campaign_id": campaign_id,
-            "count": len(chosen),
+            "count": chosen_count,
+            "contact_reused": len(preserved),
+            "contact_readd": len(assigned_new),
             "retry_round": retry_round,
             "source_campaign_id": source_campaign_id,
         }
