@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS recipients (
     error_code TEXT,
     error_message TEXT,
     telegram_message_id TEXT,
+    handoff_status TEXT NOT NULL DEFAULT 'NONE',
+    handoff_source_campaign_id INTEGER,
+    handoff_from_account_id INTEGER,
+    handoff_reason TEXT,
+    handoff_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     processed_at TEXT,
@@ -118,6 +123,22 @@ ON recipients(normalized_phone);
 CREATE INDEX IF NOT EXISTS idx_recipient_status
 ON recipients(status, contact_status);
 
+CREATE TABLE IF NOT EXISTS assignment_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_id INTEGER NOT NULL,
+    source_campaign_id INTEGER,
+    target_campaign_id INTEGER,
+    from_account_id INTEGER,
+    to_account_id INTEGER,
+    event_type TEXT NOT NULL,
+    reason_code TEXT,
+    reason_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_assignment_history_recipient
+ON assignment_history(recipient_id, created_at);
+
 CREATE TABLE IF NOT EXISTS retry_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     recipient_id INTEGER NOT NULL,
@@ -203,6 +224,11 @@ class Database:
                 "contact_status": "TEXT NOT NULL DEFAULT 'NOT_ADDED'",
                 "contact_added_at": "TEXT",
                 "contact_name": "TEXT",
+                "handoff_status": "TEXT NOT NULL DEFAULT 'NONE'",
+                "handoff_source_campaign_id": "INTEGER",
+                "handoff_from_account_id": "INTEGER",
+                "handoff_reason": "TEXT",
+                "handoff_count": "INTEGER NOT NULL DEFAULT 0",
             })
             self._ensure_columns(conn, "campaigns", {
                 "contact_ready_count": "INTEGER NOT NULL DEFAULT 0",
