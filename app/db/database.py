@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS telegram_accounts (
     status TEXT NOT NULL DEFAULT 'UNKNOWN',
     last_error TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
+    worker_sector INTEGER NOT NULL DEFAULT 1,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -209,6 +210,9 @@ class Database:
                 "contact_finished_at": "TEXT",
                 "retry_of_campaign_id": "INTEGER",
                 "retry_round": "INTEGER NOT NULL DEFAULT 0",
+            })
+            self._ensure_columns(conn, "telegram_accounts", {
+                "worker_sector": "INTEGER NOT NULL DEFAULT 1",
             })
             self._ensure_columns(conn, "campaign_recipients", {
                 "contact_status": "TEXT NOT NULL DEFAULT 'WAITING'",
