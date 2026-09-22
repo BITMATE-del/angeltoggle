@@ -104,6 +104,7 @@ def main():
         win.activateWindow()
         app.processEvents()
         _startup_log("OK: MainWindow shown")
+        QTimer.singleShot(1800, win.manual_update_check)
         sys.exit(app.exec())
 
     except Exception as e:
