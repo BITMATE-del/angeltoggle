@@ -33,41 +33,48 @@ jobs:
           Set-Content -Path app\version.py -Value ('VERSION = "' + $env:APP_VERSION + '"') -Encoding UTF8
 
       - name: Syntax check
-        run: python -m compileall -q app main.py
+        run: python -m compileall -q app main.py bootstrap_updater.py
 
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
-      - name: Build stable onedir package
+      - name: Build stable onedir application
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onedir --windowed --name "AngelToggle" --hidden-import pyexpat --collect-submodules xml main.py
-          if (-not (Test-Path dist\AngelToggle\AngelToggle.exe)) { throw "AngelToggle.exe missing" }
-          if (-not (Test-Path dist\AngelToggle\_internal\pyexpat.pyd)) {
-            $expat = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter pyexpat.pyd | Select-Object -First 1
-            if (-not $expat) { throw "pyexpat.pyd missing from onedir build" }
-          }
+          if (-not (Test-Path dist\AngelToggle\AngelToggle.exe)) { throw "AngelToggle.exe missing from app build" }
+          $expat = Get-ChildItem -Path dist\AngelToggle -Recurse -Filter pyexpat.pyd | Select-Object -First 1
+          if (-not $expat) { throw "pyexpat.pyd missing from onedir build" }
 
-      - name: Smoke test onedir package
+      - name: Smoke test onedir application
         shell: pwsh
         run: |
           $p = Start-Process -FilePath ".\dist\AngelToggle\AngelToggle.exe" -WorkingDirectory ".\dist\AngelToggle" -PassThru
           Start-Sleep -Seconds 10
-          if ($p.HasExited) { throw "AngelToggle.exe exited during smoke test. ExitCode=$($p.ExitCode)" }
+          if ($p.HasExited) { throw "AngelToggle app exited during smoke test. ExitCode=$($p.ExitCode)" }
           Stop-Process -Id $p.Id -Force
 
-      - name: Create release ZIP
+      - name: Build backwards-compatible launcher
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name "AngelToggleLauncher" bootstrap_updater.py
+          if (-not (Test-Path dist\AngelToggleLauncher.exe)) { throw "Launcher build failed" }
+
+      - name: Create release files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item dist\AngelToggle release\AngelToggle -Recurse
           Compress-Archive -Path release\AngelToggle -DestinationPath AngelToggle-Windows.zip -Force
+          Copy-Item dist\AngelToggleLauncher.exe release\AngelToggle.exe
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: AngelToggle-Windows
-          path: AngelToggle-Windows.zip
+          path: |
+            release/AngelToggle.exe
+            AngelToggle-Windows.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -77,4 +84,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v" + $env:APP_VERSION
-          gh release create $tag AngelToggle-Windows.zip --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Stable onedir AngelToggle build"
+          gh release create $tag release\AngelToggle.exe AngelToggle-Windows.zip --target $env:GITHUB_SHA --title "AngelToggle $tag" --notes "Backwards-compatible launcher plus stable onedir application"
