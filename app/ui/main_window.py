@@ -1875,6 +1875,9 @@ class MainWindow(QMainWindow):
         add = QPushButton("[ 세션 ZIP / SESSION 파일 등록 ]")
         add.clicked.connect(self.import_sessions)
 
+        assign_db = QPushButton("[ 체크 계정에 대기 DB 배정 ]")
+        assign_db.clicked.connect(self.assign_waiting_db_to_checked_accounts)
+
         unassign = QPushButton("[ 체크 계정 배정취소 ]")
         unassign.clicked.connect(self.unassign_checked_accounts)
 
@@ -1882,6 +1885,7 @@ class MainWindow(QMainWindow):
         bulk_delete.clicked.connect(self.delete_selected_account)
 
         top_buttons.addWidget(add)
+        top_buttons.addWidget(assign_db)
         top_buttons.addWidget(unassign)
         top_buttons.addWidget(bulk_delete)
         l.addLayout(top_buttons)
@@ -1925,8 +1929,9 @@ class MainWindow(QMainWindow):
         l.addLayout(row)
 
         info = QLabel(
-            "배정취소는 아직 완료되지 않은 작업만 해제하며, 발송 완료 이력은 유지됩니다.\n"
-            "계정 삭제 시 진행 중 배정이 있으면 먼저 배정취소 후 삭제할 수 있습니다."
+            "연락처 추가 전에 체크한 정상 계정에 대기 DB를 균등 배정할 수 있습니다.\n"
+            "수동 배정 대상은 PENDING / 재배정 대기 DB이며, MESSAGE_SENT·최종실패·수동확인·Telegram 제한 건은 제외됩니다.\n"
+            "배정취소는 아직 완료되지 않은 작업만 해제하며, 발송 완료 이력은 유지됩니다."
         )
         info.setObjectName("보조")
         l.addWidget(info)
@@ -1977,6 +1982,98 @@ class MainWindow(QMainWindow):
         dialog = ChatViewerDialog(self.db, self.logs, account_id, self)
         dialog.setStyleSheet(CMD_STYLE)
         dialog.exec()
+
+    def assign_waiting_db_to_checked_accounts(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.warning(
+                self,
+                "작업 실행 중",
+                "연락처 추가/발송 작업이 실행 중일 때는 DB를 새로 배정할 수 없습니다."
+            )
+            return
+
+        account_ids = self.checked_account_ids()
+        if not account_ids:
+            QMessageBox.information(
+                self,
+                "계정 체크",
+                "DB를 배정할 텔레그램 계정을 먼저 체크해주세요."
+            )
+            return
+
+        pending = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients "
+            "WHERE status IN ('PENDING','REASSIGN_WAITING')"
+        )
+        pending_count = int(pending["c"] or 0) if pending else 0
+
+        if pending_count <= 0:
+            QMessageBox.information(
+                self,
+                "대기 DB 없음",
+                "현재 체크 계정에 배정할 PENDING / 재배정 대기 DB가 없습니다."
+            )
+            return
+
+        max_per = int(self.db.get_setting("max_contacts_per_account", "40") or 40)
+
+        answer = QMessageBox.question(
+            self,
+            "대기 DB 수동 배정",
+            f"체크한 계정 {len(account_ids)}개에 대기 DB를 균등 배정하시겠습니까?\n\n"
+            f"현재 배정 가능 DB: {pending_count}건\n"
+            f"계정당 최대 처리량: {max_per}건\n\n"
+            "배정 후 [1단계 · 연락처 추가 시작] 또는 [전체 자동 진행]으로 이어서 처리할 수 있습니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            bot_username = self.db.get_setting("postbot_username", "@PostBot") or "@PostBot"
+            post_code = self.db.get_setting("postbot_link", "")
+            campaign_name = "수동배정_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            result = self.send_engine.create_manual_assignment_campaign(
+                account_ids=account_ids,
+                name=campaign_name,
+                bot_username=bot_username,
+                post_code=post_code,
+            )
+
+            self.current_campaign_id = result["campaign_id"]
+
+            self.refresh_accounts()
+            self.refresh_summary()
+            self.refresh_work_status()
+            self.refresh_db_status_tabs()
+            self.refresh_progress_sectors()
+            self.refresh_live_progress()
+
+            per_account = result.get("per_account") or {}
+            dist = ", ".join(
+                f"계정 {aid}: {count}건"
+                for aid, count in sorted(per_account.items())
+            )
+
+            msg = (
+                f"작업 #{result['campaign_id']} 생성\n"
+                f"체크 계정: {result['account_count']}개\n"
+                f"DB 배정: {result['assigned']}건\n"
+            )
+            if result.get("excluded_accounts"):
+                msg += f"사용 불가 계정 제외: {result['excluded_accounts']}개\n"
+            if dist:
+                msg += f"\n배정 내역\n{dist}"
+
+            QMessageBox.information(
+                self,
+                "대기 DB 배정 완료",
+                msg
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "DB 배정 오류", str(e))
 
     def unassign_checked_accounts(self):
         if self.worker_thread and self.worker_thread.is_alive():
