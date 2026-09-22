@@ -2,7 +2,7 @@ import threading
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import *
 
 from app.services.db_import_service import DBImportService
@@ -578,11 +578,42 @@ class MainWindow(QMainWindow):
         self.db_result.setObjectName("상태패널")
         l.addWidget(self.db_result)
 
-        self.duplicate_view = QTextEdit()
-        self.duplicate_view.setReadOnly(True)
-        self.duplicate_view.setPlaceholderText("중복번호가 발견되면 이곳에 표시됩니다.")
-        l.addWidget(self.duplicate_view)
+        self.db_table = QTableWidget(0, 4)
+        self.db_table.setHorizontalHeaderLabels(["번호", "원본 번호", "변환 번호", "상태"])
+        self.db_table.horizontalHeader().setStretchLastSection(True)
+        self.db_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.db_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        l.addWidget(self.db_table)
         return w
+
+    def show_imported_db_rows(self, import_id):
+        rows = self.db_import.get_import_rows(import_id)
+        self.db_table.setRowCount(len(rows))
+
+        duplicate_color = QColor(255, 90, 90)
+
+        for idx, row in enumerate(rows):
+            is_dup = row["type"] == "DUPLICATE"
+            status_text = (
+                f"중복 · {row['reason']}"
+                if is_dup else
+                "사용 가능"
+            )
+
+            values = [
+                idx + 1,
+                row["phone"] or "",
+                row["normalized_phone"] or "",
+                status_text,
+            ]
+
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if is_dup:
+                    item.setForeground(duplicate_color)
+                self.db_table.setItem(idx, col, item)
+
+        self.db_table.resizeColumnsToContents()
 
     def import_db(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -600,37 +631,48 @@ class MainWindow(QMainWindow):
                 f"[업로드 완료]\n"
                 f"전체: {s['total']}명\n"
                 f"즉시 사용 가능: {s['valid']}명\n"
-                f"중복 검수: {s['duplicate']}명\n"
+                f"중복: {s['duplicate']}명\n"
                 f"번호 오류: {s['invalid']}명"
             )
 
-            if s["duplicate"]:
-                duplicates = self.db_import.get_duplicates(s["import_id"])
-                lines = [
-                    f"{idx+1}. {row['normalized_phone']} · {row['reason']}"
-                    for idx, row in enumerate(duplicates)
-                ]
-                self.duplicate_view.setPlainText("\n".join(lines))
+            self.show_imported_db_rows(s["import_id"])
 
+            if s["duplicate"]:
                 box = QMessageBox(self)
-                box.setWindowTitle("중복번호 검수")
-                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("중복번호 확인")
+                box.setIcon(QMessageBox.Warning)
                 box.setText(
-                    f"중복된 번호 {s['duplicate']}개를 발견했습니다.\n\n"
-                    f"중복번호를 제외한 {s['valid']}개 번호는 이미 바로 사용할 수 있습니다.\n"
-                    "중복된 번호도 사용 DB에 추가하시겠습니까?"
+                    f"중복 번호 {s['duplicate']}개가 있습니다.\n\n"
+                    "빨간색으로 표시된 중복 번호를 제거하시겠습니까?"
                 )
-                add_btn = box.addButton("중복번호 추가", QMessageBox.AcceptRole)
-                exclude_btn = box.addButton("중복번호 제외", QMessageBox.RejectRole)
+                remove_btn = box.addButton("중복 제거", QMessageBox.AcceptRole)
+                keep_btn = box.addButton("중복 유지", QMessageBox.RejectRole)
                 box.exec()
 
-                if box.clickedButton() == add_btn:
-                    added = self.db_import.approve_duplicates(s["import_id"])
-                    self.logs.write("INFO", "DB", f"사용자 선택으로 중복번호 {added}개 추가")
+                if box.clickedButton() == remove_btn:
+                    removed = self.db_import.reject_duplicates(s["import_id"])
+                    self.logs.write(
+                        "INFO",
+                        "DB",
+                        f"중복번호 {removed}개 제거",
+                    )
+                    QMessageBox.information(
+                        self,
+                        "중복 제거 완료",
+                        f"중복번호 {removed}개를 제외했습니다."
+                    )
                 else:
-                    self.db_import.reject_duplicates(s["import_id"])
-            else:
-                self.duplicate_view.setPlainText("중복번호 없음")
+                    added = self.db_import.approve_duplicates(s["import_id"])
+                    self.logs.write(
+                        "INFO",
+                        "DB",
+                        f"사용자 선택으로 중복번호 {added}개 유지",
+                    )
+                    QMessageBox.information(
+                        self,
+                        "중복 유지",
+                        f"중복번호 {added}개를 고객 DB에 포함했습니다."
+                    )
 
             self.refresh_summary()
         except Exception as e:
