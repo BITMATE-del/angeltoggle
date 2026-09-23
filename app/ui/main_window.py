@@ -11,6 +11,7 @@ from app.services.session_service import SessionService
 from app.services.send_engine import SendEngine
 from app.services.update_service import UpdateService
 from app.services.completion_export_service import CompletionExportService
+from app.services.telegram_check_service import TelegramCheckService, TelegramCheckError
 from app.ui.chat_viewer import ChatViewerDialog
 
 
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
         self.send_engine = SendEngine(db, logs)
         self.update_service = UpdateService(logs)
         self.completion_export = CompletionExportService(db, logs)
+        self.telegram_check = TelegramCheckService(db, logs)
         self.license_info = license_info or {}
 
         self.bridge = 신호브리지()
@@ -185,6 +187,7 @@ class MainWindow(QMainWindow):
 
         self.worker_thread = None
         self.current_campaign_id = None
+        self.current_telegram_check_task_id = None
         self.latest_installer_info = None
         self.update_installing = False
 
