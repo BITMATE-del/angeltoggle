@@ -1716,6 +1716,16 @@ class SendEngine:
                         recipient_id=recipient_id,
                     )
 
+                    try:
+                        send_interval = float(
+                            self.db.get_setting("telegram_send_interval_seconds", "1.0") or 1.0
+                        )
+                    except Exception:
+                        send_interval = 1.0
+                    send_interval = max(0.0, min(send_interval, 10.0))
+                    if send_interval > 0:
+                        await asyncio.sleep(send_interval)
+
                 except PointError as e:
                     if point_reserved:
                         try:
