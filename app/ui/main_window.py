@@ -2438,6 +2438,124 @@ class MainWindow(QMainWindow):
             "다음 작업에서 실제 텔레그램 계정 상태를 다시 확인합니다."
         )
 
+    def telegram_check_page(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.addWidget(self.title("텔레그램 가입자 검수", "C:\\엔젤토글> 가입자 검수 파일 준비"))
+
+        info = QLabel(
+            "전화번호 파일을 업로드하면 정상 번호, 중복 번호, 잘못된 번호를 분리하고 실제 검수 수량과 금액을 계산합니다.\n"
+            "단가 0.6 KRW/건 · 최소 5,000건 · 최대 1,000,000건"
+        )
+        info.setObjectName("상태패널")
+        info.setWordWrap(True)
+        l.addWidget(info)
+
+        controls = QHBoxLayout()
+        self.telegram_check_filter = QComboBox()
+        for label, value in [("1일", "1D"), ("3일", "3D"), ("7일", "7D"), ("전체", "ALL")]:
+            self.telegram_check_filter.addItem(label, value)
+        self.telegram_check_filter.setCurrentIndex(3)
+
+        upload = QPushButton("[ 전화번호 파일 업로드 ]")
+        upload.clicked.connect(self.prepare_telegram_check_file)
+        refresh = QPushButton("[ 검수 내역 새로고침 ]")
+        refresh.clicked.connect(self.refresh_telegram_check_tasks)
+        guide = QPushButton("[ 이용 안내 ]")
+        guide.clicked.connect(self.show_telegram_check_guide)
+
+        controls.addWidget(QLabel("검수 조건"))
+        controls.addWidget(self.telegram_check_filter)
+        controls.addWidget(upload)
+        controls.addWidget(refresh)
+        controls.addWidget(guide)
+        controls.addStretch()
+        l.addLayout(controls)
+
+        self.telegram_check_summary = QLabel("[대기] TXT / CSV / XLSX 파일을 업로드해주세요.")
+        self.telegram_check_summary.setObjectName("상태패널")
+        self.telegram_check_summary.setWordWrap(True)
+        self.telegram_check_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        l.addWidget(self.telegram_check_summary)
+
+        self.telegram_check_table = QTableWidget(0, 8)
+        self.telegram_check_table.setHorizontalHeaderLabels([
+            "작업", "검수일시", "파일", "검수 수량", "조건", "예상 금액", "상태", "API Task ID"
+        ])
+        self.telegram_check_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.telegram_check_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.telegram_check_table.horizontalHeader().setStretchLastSection(True)
+        l.addWidget(self.telegram_check_table, 1)
+        QTimer.singleShot(0, self.refresh_telegram_check_tasks)
+        return w
+
+    def prepare_telegram_check_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "가입자 검수 전화번호 파일", "",
+            "전화번호 파일 (*.txt *.csv *.xlsx);;텍스트 (*.txt);;CSV (*.csv);;Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        self.telegram_check_summary.setText("[처리중] 번호 형식과 중복을 검사하고 있습니다...")
+        QApplication.processEvents()
+        try:
+            result = self.telegram_check.prepare_file(
+                path, self.telegram_check_filter.currentData() or "ALL"
+            )
+            self.current_telegram_check_task_id = result["id"]
+            ok, reason = self.telegram_check.can_start(result["id"])
+            text = (
+                f"[파일 검증 완료] 작업 #{result['id']}\n"
+                f"전체 입력: {int(result['total_input_count']):,}건\n"
+                f"정상 번호: {int(result['valid_count']):,}건\n"
+                f"중복 제외: {int(result['duplicate_count']):,}건\n"
+                f"잘못된 번호: {int(result['invalid_count']):,}건\n"
+                f"실제 검수 수량: {int(result['charged_count']):,}건\n"
+                f"예상 금액: {float(result['amount_krw']):,.1f} KRW"
+            )
+            if not ok:
+                text += f"\n\n[검수 시작 불가] {reason}"
+            self.telegram_check_summary.setText(text)
+            self.refresh_telegram_check_tasks()
+        except TelegramCheckError as e:
+            self.telegram_check_summary.setText(f"[오류] {e}")
+            QMessageBox.warning(self, "가입자 검수 파일 오류", str(e))
+        except Exception as e:
+            self.telegram_check_summary.setText(f"[오류] {e}")
+            QMessageBox.critical(self, "가입자 검수 오류", str(e))
+
+    def refresh_telegram_check_tasks(self):
+        if not hasattr(self, "telegram_check_table"):
+            return
+        rows = self.telegram_check.list_tasks(100)
+        self.telegram_check_table.setRowCount(len(rows))
+        status_map = {
+            "DRAFT":"검수 준비", "PENDING":"검수 대기", "PROCESSING":"검수 진행중",
+            "COMPLETED":"검수 완료", "FAILED":"검수 실패", "CANCELLED":"검수 취소"
+        }
+        filter_map = {"1D":"1일", "3D":"3일", "7D":"7일", "ALL":"전체"}
+        for r, row in enumerate(rows):
+            values = [
+                row["id"], row["created_at"] or "", row["source_file"] or "",
+                f"{int(row['charged_count'] or 0):,}",
+                filter_map.get(row["filter_type"], row["filter_type"]),
+                f"{int(row['amount_tenths_krw'] or 0)/10:,.1f} KRW",
+                status_map.get(row["status"], row["status"]),
+                row["api_task_id"] or "",
+            ]
+            for col, value in enumerate(values):
+                self.telegram_check_table.setItem(r, col, QTableWidgetItem(str(value)))
+        self.telegram_check_table.resizeColumnsToContents()
+
+    def show_telegram_check_guide(self):
+        QMessageBox.information(
+            self, "텔레그램 가입자 검수 이용 안내",
+            "[텔레그램 가입자 검수]\n\n"
+            "• 1건당 0.6 KRW\n• 최소 5,000건\n• 최대 1,000,000건\n\n"
+            "검수 조건: 1일 / 3일 / 7일 / 전체\n"
+            "중복 번호와 잘못된 번호는 실제 검수 수량에서 제외됩니다."
+        )
+
     def log_page(self):
         w = QWidget()
         l = QVBoxLayout(w)
