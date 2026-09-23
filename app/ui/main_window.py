@@ -2445,7 +2445,7 @@ class MainWindow(QMainWindow):
 
         info = QLabel(
             "전화번호 파일을 업로드하면 정상 번호, 중복 번호, 잘못된 번호를 분리하고 실제 검수 수량과 금액을 계산합니다.\n"
-            "단가 0.6 KRW/건 · 최소 5,000건 · 최대 1,000,000건"
+            "단가 0.6 KRW/건 · 최소 100건 · 최대 1,000,000건"
         )
         info.setObjectName("상태패널")
         info.setWordWrap(True)
@@ -2551,7 +2551,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "텔레그램 가입자 검수 이용 안내",
             "[텔레그램 가입자 검수]\n\n"
-            "• 1건당 0.6 KRW\n• 최소 5,000건\n• 최대 1,000,000건\n\n"
+            "• 1건당 0.6 KRW\n• 최소 100건\n• 최대 1,000,000건\n\n"
             "검수 조건: 1일 / 3일 / 7일 / 전체\n"
             "중복 번호와 잘못된 번호는 실제 검수 수량에서 제외됩니다."
         )
