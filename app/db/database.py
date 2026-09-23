@@ -240,6 +240,27 @@ CREATE TABLE IF NOT EXISTS telegram_check_results (
 
 CREATE INDEX IF NOT EXISTS idx_telegram_check_results_task
 ON telegram_check_results(task_id, phone_number);
+
+CREATE TABLE IF NOT EXISTS telegram_check_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    batch_no INTEGER NOT NULL,
+    api_task_id TEXT,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    total_count INTEGER NOT NULL DEFAULT 0,
+    checked_count INTEGER NOT NULL DEFAULT 0,
+    result_file_path TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    UNIQUE(task_id, batch_no),
+    FOREIGN KEY(task_id) REFERENCES telegram_check_tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_check_batches_task
+ON telegram_check_batches(task_id, batch_no);
 """
 
 class Database:
