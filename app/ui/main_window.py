@@ -2487,9 +2487,9 @@ class MainWindow(QMainWindow):
         self.telegram_check_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         l.addWidget(self.telegram_check_summary)
 
-        self.telegram_check_table = QTableWidget(0, 8)
+        self.telegram_check_table = QTableWidget(0, 7)
         self.telegram_check_table.setHorizontalHeaderLabels([
-            "작업", "검수일시", "파일", "검수 수량", "조건", "예상 금액", "상태", "API Task ID"
+            "작업", "검수일시", "파일", "검수 수량", "조건", "예상 금액", "상태"
         ])
         self.telegram_check_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.telegram_check_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -2652,7 +2652,6 @@ class MainWindow(QMainWindow):
                 filter_map.get(row["filter_type"], row["filter_type"]),
                 f"{int(row['amount_tenths_krw'] or 0)/10:,.1f} KRW",
                 status_map.get(row["status"], row["status"]),
-                row["api_task_id"] or "",
             ]
             for col, value in enumerate(values):
                 self.telegram_check_table.setItem(r, col, QTableWidgetItem(str(value)))
