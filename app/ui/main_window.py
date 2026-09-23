@@ -3506,6 +3506,23 @@ class MainWindow(QMainWindow):
         self.max_contacts.setRange(1, 200)
         self.max_contacts.setValue(int(self.db.get_setting("max_contacts_per_account", "40") or 40))
         wf.addRow("계정당 최대 연락처", self.max_contacts)
+
+        self.send_interval = QDoubleSpinBox()
+        self.send_interval.setRange(0.0, 10.0)
+        self.send_interval.setSingleStep(0.5)
+        self.send_interval.setDecimals(1)
+        self.send_interval.setValue(
+            float(self.db.get_setting("telegram_send_interval_seconds", "1.0") or 1.0)
+        )
+        wf.addRow("계정별 발송 간격(초)", self.send_interval)
+
+        self.short_flood_wait = QSpinBox()
+        self.short_flood_wait.setRange(0, 300)
+        self.short_flood_wait.setValue(
+            int(self.db.get_setting("telegram_short_flood_wait_seconds", "60") or 60)
+        )
+        wf.addRow("짧은 FloodWait 자동대기(초)", self.short_flood_wait)
+
         work_save = QPushButton("[ 작업 설정 저장 ]")
         work_save.clicked.connect(self.save_work_settings)
         wf.addRow(work_save)
@@ -3554,8 +3571,28 @@ class MainWindow(QMainWindow):
 
     def save_work_settings(self):
         self.db.set_setting("max_contacts_per_account", self.max_contacts.value())
-        self.logs.write("INFO", "설정", f"계정당 최대 연락처 {self.max_contacts.value()}명으로 저장")
-        QMessageBox.information(self, "저장 완료", "연락처 작업 설정을 저장했습니다.")
+        self.db.set_setting(
+            "telegram_send_interval_seconds",
+            f"{float(self.send_interval.value()):.1f}",
+        )
+        self.db.set_setting(
+            "telegram_short_flood_wait_seconds",
+            int(self.short_flood_wait.value()),
+        )
+        self.logs.write(
+            "INFO",
+            "설정",
+            f"작업 설정 저장 / 계정당 연락처 {self.max_contacts.value()}명 / "
+            f"발송간격 {self.send_interval.value():.1f}초 / "
+            f"짧은 FloodWait 자동대기 {self.short_flood_wait.value()}초",
+        )
+        QMessageBox.information(
+            self,
+            "저장 완료",
+            "작업 설정을 저장했습니다.\n\n"
+            f"계정별 발송 간격: {self.send_interval.value():.1f}초\n"
+            f"짧은 FloodWait 자동대기: 최대 {self.short_flood_wait.value()}초"
+        )
 
     def update_button_clicked(self):
         info = self.latest_installer_info or {}
