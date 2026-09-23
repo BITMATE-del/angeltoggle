@@ -2589,6 +2589,7 @@ class MainWindow(QMainWindow):
                 f"검수 수량: {int(result['charged_count'] or 0):,}건\n"
                 f"결과 수량: {int(result['success_count'] or 0):,}건\n"
                 f"누락 수량: {int(result['missing_count'] or 0):,}건\n"
+                f"누락 환불 예정액: {float(result['refund_krw']):,.1f} KRW\n"
                 f"상태: {result['status']}"
             )
             self.refresh_telegram_check_tasks()
