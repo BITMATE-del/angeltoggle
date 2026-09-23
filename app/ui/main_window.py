@@ -12,6 +12,7 @@ from app.services.send_engine import SendEngine
 from app.services.update_service import UpdateService
 from app.services.completion_export_service import CompletionExportService
 from app.services.telegram_check_service import TelegramCheckService, TelegramCheckError
+from app.services.telegram_check_api_service import TelegramCheckApiService
 from app.ui.chat_viewer import ChatViewerDialog
 
 
@@ -178,6 +179,7 @@ class MainWindow(QMainWindow):
         self.update_service = UpdateService(logs)
         self.completion_export = CompletionExportService(db, logs)
         self.telegram_check = TelegramCheckService(db, logs)
+        self.telegram_check_api = TelegramCheckApiService(db, logs)
         self.license_info = license_info or {}
 
         self.bridge = 신호브리지()
