@@ -1179,6 +1179,70 @@ class MainWindow(QMainWindow):
             self.refresh_summary()
             return
 
+        if kind == "가입자검수진행":
+            stage = result.get("stage")
+            task_id = result.get("task_id")
+            batch_no = result.get("batch_no")
+            if stage == "submitted":
+                self.telegram_check_summary.setText(
+                    f"[검수 진행중] 작업 #{task_id}\n"
+                    f"배치 #{batch_no} 외부 API 등록 완료\n"
+                    f"배치 수량: {int(result.get('count') or 0):,}건"
+                )
+            elif stage == "processing":
+                checked = int(result.get("checked") or 0)
+                total = int(result.get("total") or 0)
+                self.telegram_check_summary.setText(
+                    f"[검수 진행중] 작업 #{task_id}\n"
+                    f"배치 #{batch_no}\n"
+                    f"외부 API 진행: {checked:,} / {total:,}건"
+                )
+            elif stage == "batch_failed":
+                self.telegram_check_summary.setText(
+                    f"[일부 배치 실패] 작업 #{task_id}\n"
+                    f"배치 #{batch_no} / {int(result.get('count') or 0):,}건\n"
+                    f"{result.get('error') or ''}"
+                )
+            self.refresh_telegram_check_tasks()
+            return
+
+        if kind == "가입자검수완료":
+            self.telegram_check_worker_running = False
+            task_id = result.get("task_id")
+            self.telegram_check_summary.setText(
+                f"[검수 완료] 작업 #{task_id}\n"
+                f"가입: {int(result.get('joined_count') or 0):,}건\n"
+                f"미가입: {int(result.get('not_joined_count') or 0):,}건\n"
+                f"확인불가: {int(result.get('uncertain_count') or 0):,}건\n"
+                f"배치: {int(result.get('batch_count') or 0):,}개\n"
+                f"상태: {result.get('status') or ''}"
+            )
+            self.refresh_telegram_check_tasks()
+            QMessageBox.information(
+                self,
+                "가입자 검수 완료",
+                f"작업 #{task_id} 검수가 완료되었습니다.\n\n"
+                f"가입: {int(result.get('joined_count') or 0):,}건\n"
+                f"미가입: {int(result.get('not_joined_count') or 0):,}건\n"
+                f"확인불가: {int(result.get('uncertain_count') or 0):,}건"
+            )
+            return
+
+        if kind == "가입자검수오류":
+            self.telegram_check_worker_running = False
+            task_id = result.get("task_id")
+            error = result.get("error") or "알 수 없는 오류"
+            self.telegram_check_summary.setText(
+                f"[검수 오류] 작업 #{task_id}\n{error}"
+            )
+            self.refresh_telegram_check_tasks()
+            QMessageBox.critical(
+                self,
+                "가입자 검수 오류",
+                error,
+            )
+            return
+
         if kind == "포스트봇체크":
             if result.get("ok"):
                 info = result.get("result") or {}
