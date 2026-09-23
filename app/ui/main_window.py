@@ -1321,6 +1321,15 @@ class MainWindow(QMainWindow):
         assign_handoff = QPushButton("[ 재배정 대기 자동 배정 ]")
         assign_handoff.clicked.connect(self.assign_residual_db)
 
+        delete_selected = QPushButton("[ 선택 DB 삭제 ]")
+        delete_selected.clicked.connect(self.delete_selected_db)
+
+        delete_pending = QPushButton("[ 대기 DB 전체 삭제 ]")
+        delete_pending.clicked.connect(self.delete_all_pending_db)
+
+        clear_all = QPushButton("[ 고객 DB 전체 초기화 ]")
+        clear_all.clicked.connect(self.clear_all_customer_db)
+
         refresh = QPushButton("[ DB 상태 새로고침 ]")
         refresh.clicked.connect(self.refresh_db_status_tabs)
 
@@ -1329,6 +1338,9 @@ class MainWindow(QMainWindow):
         db_buttons.addWidget(unassign_db)
         db_buttons.addWidget(classify_handoff)
         db_buttons.addWidget(assign_handoff)
+        db_buttons.addWidget(delete_selected)
+        db_buttons.addWidget(delete_pending)
+        db_buttons.addWidget(clear_all)
         db_buttons.addWidget(refresh)
         l.addLayout(db_buttons)
 
@@ -1555,6 +1567,207 @@ class MainWindow(QMainWindow):
             f"[최종실패] {counts.get('final', 0)}명   |   "
             f"[크리티컬 잔여] {counts.get('critical', 0)}명"
         )
+
+    def _current_db_status_key(self):
+        if not hasattr(self, "db_tabs"):
+            return None
+        keys = [
+            "pending", "assigned", "running", "completed", "failed",
+            "reassign", "blocked", "final", "critical", "upload"
+        ]
+        index = self.db_tabs.currentIndex()
+        return keys[index] if 0 <= index < len(keys) else None
+
+    def _selected_recipient_ids(self):
+        kind = self._current_db_status_key()
+        if not kind or kind == "upload":
+            return []
+
+        table = self.db_status_tables.get(kind)
+        if not table:
+            return []
+
+        rows = sorted({index.row() for index in table.selectionModel().selectedRows()})
+        ids = []
+        for row in rows:
+            item = table.item(row, 0)
+            if not item:
+                continue
+            text = item.text().strip()
+            if text.upper().startswith("DB"):
+                text = text[2:]
+            try:
+                ids.append(int(text))
+            except Exception:
+                pass
+        return ids
+
+    def delete_selected_db(self):
+        kind = self._current_db_status_key()
+        if kind == "upload":
+            QMessageBox.information(
+                self,
+                "DB 삭제",
+                "최근 업로드 탭에서는 직접 삭제할 수 없습니다.\n"
+                "상태별 DB 탭에서 삭제할 행을 선택해주세요."
+            )
+            return
+
+        ids = self._selected_recipient_ids()
+        if not ids:
+            QMessageBox.information(
+                self,
+                "DB 삭제",
+                "삭제할 DB 행을 먼저 선택해주세요."
+            )
+            return
+
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.db.fetchall(
+            f"SELECT id,status FROM recipients WHERE id IN ({placeholders})",
+            ids,
+        )
+        running = [r for r in rows if r["status"] in ("SENDING", "UNCERTAIN")]
+        if running:
+            QMessageBox.warning(
+                self,
+                "삭제 불가",
+                "진행중 또는 결과가 불확실한 DB는 바로 삭제할 수 없습니다.\n"
+                "작업 상태를 먼저 확인해주세요."
+            )
+            return
+
+        completed_count = sum(1 for r in rows if r["status"] == "MESSAGE_SENT")
+        message = f"선택한 DB {len(ids)}건을 삭제하시겠습니까?"
+        if completed_count:
+            message += (
+                f"\n\n발송완료 DB {completed_count}건이 포함되어 있습니다. "
+                "관련 발송 이력도 함께 정리됩니다."
+            )
+
+        answer = QMessageBox.question(
+            self,
+            "선택 DB 삭제",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            deleted = self.db.delete_recipients(ids)
+            self.logs.write("INFO", "DB", f"선택 고객 DB {deleted}건 삭제")
+            self.refresh_db_status_tabs()
+            self.refresh_summary()
+            self.refresh_work_status()
+            QMessageBox.information(
+                self,
+                "DB 삭제 완료",
+                f"선택한 고객 DB {deleted}건을 삭제했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "DB 삭제 오류", str(e))
+
+    def delete_all_pending_db(self):
+        row = self.db.fetchone(
+            "SELECT COUNT(*) c FROM recipients "
+            "WHERE status='PENDING' AND assigned_account_id IS NULL"
+        )
+        count = int(row["c"] or 0)
+        if count <= 0:
+            QMessageBox.information(self, "대기 DB 삭제", "삭제할 대기 DB가 없습니다.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "대기 DB 전체 삭제",
+            f"현재 대기 DB {count:,}건을 모두 삭제하시겠습니까?\n\n"
+            "배정된 DB, 진행중 DB, 발송완료 DB는 삭제되지 않습니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        ids = [
+            int(r["id"]) for r in self.db.fetchall(
+                "SELECT id FROM recipients "
+                "WHERE status='PENDING' AND assigned_account_id IS NULL"
+            )
+        ]
+        try:
+            deleted = self.db.delete_recipients(ids)
+            self.logs.write("INFO", "DB", f"대기 고객 DB {deleted}건 일괄 삭제")
+            self.refresh_db_status_tabs()
+            self.refresh_summary()
+            self.refresh_work_status()
+            QMessageBox.information(
+                self,
+                "대기 DB 삭제 완료",
+                f"대기 DB {deleted:,}건을 삭제했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "대기 DB 삭제 오류", str(e))
+
+    def clear_all_customer_db(self):
+        total = int(
+            self.db.fetchone("SELECT COUNT(*) c FROM recipients")["c"] or 0
+        )
+        if total <= 0:
+            QMessageBox.information(self, "고객 DB 초기화", "초기화할 고객 DB가 없습니다.")
+            return
+
+        active = int(
+            self.db.fetchone(
+                "SELECT COUNT(*) c FROM recipients "
+                "WHERE status IN ('SENDING','UNCERTAIN')"
+            )["c"] or 0
+        )
+        if active:
+            QMessageBox.warning(
+                self,
+                "초기화 불가",
+                f"진행중/불확실 DB {active}건이 있습니다.\n"
+                "작업을 먼저 정리한 뒤 다시 시도해주세요."
+            )
+            return
+
+        first = QMessageBox.warning(
+            self,
+            "고객 DB 전체 초기화",
+            f"전체 고객 DB {total:,}건과 관련 작업 배정/작업 이력을 초기화합니다.\n\n"
+            "이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if first != QMessageBox.Yes:
+            return
+
+        second = QMessageBox.question(
+            self,
+            "최종 확인",
+            "정말 전체 고객 DB를 초기화하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if second != QMessageBox.Yes:
+            return
+
+        try:
+            deleted = self.db.clear_customer_db()
+            self.logs.write("WARNING", "DB", f"고객 DB 전체 초기화 / {deleted}건 삭제")
+            self.current_campaign_id = None
+            self.refresh_db_status_tabs()
+            self.refresh_summary()
+            self.refresh_work_status()
+            QMessageBox.information(
+                self,
+                "초기화 완료",
+                f"고객 DB {deleted:,}건을 초기화했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "고객 DB 초기화 오류", str(e))
 
     def show_imported_db_rows(self, import_id):
         rows = self.db_import.get_import_rows(import_id)
