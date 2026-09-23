@@ -308,6 +308,79 @@ class Database:
                 "postbot_code": "TEXT",
             })
 
+    def delete_recipients(self, recipient_ids):
+        ids = sorted({int(x) for x in recipient_ids if x is not None})
+        if not ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in ids)
+        with self.connection() as conn:
+            campaign_rows = conn.execute(
+                f"SELECT DISTINCT campaign_id FROM campaign_recipients "
+                f"WHERE recipient_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            campaign_ids = [int(r[0]) for r in campaign_rows]
+
+            conn.execute(
+                f"DELETE FROM campaign_recipients WHERE recipient_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM retry_history WHERE recipient_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM assignment_history WHERE recipient_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM work_logs WHERE recipient_id IN ({placeholders})",
+                ids,
+            )
+            cur = conn.execute(
+                f"DELETE FROM recipients WHERE id IN ({placeholders})",
+                ids,
+            )
+
+            for campaign_id in campaign_ids:
+                counts = conn.execute(
+                    "SELECT COUNT(*) total, "
+                    "SUM(CASE WHEN status='MESSAGE_SENT' THEN 1 ELSE 0 END) success, "
+                    "SUM(CASE WHEN status IN ('FAILED','FAILED_FINAL') THEN 1 ELSE 0 END) failed "
+                    "FROM campaign_recipients WHERE campaign_id=?",
+                    (campaign_id,),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE campaigns SET total_count=?,success_count=?,failed_count=? "
+                    "WHERE id=?",
+                    (
+                        int(counts["total"] or 0),
+                        int(counts["success"] or 0),
+                        int(counts["failed"] or 0),
+                        campaign_id,
+                    ),
+                )
+
+            return int(cur.rowcount or 0)
+
+    def clear_customer_db(self):
+        with self.connection() as conn:
+            recipient_count = int(
+                conn.execute("SELECT COUNT(*) FROM recipients").fetchone()[0] or 0
+            )
+            conn.execute("DELETE FROM campaign_recipients")
+            conn.execute("DELETE FROM retry_history")
+            conn.execute("DELETE FROM assignment_history")
+            conn.execute("DELETE FROM recipients")
+            conn.execute("DELETE FROM import_duplicates")
+            conn.execute("DELETE FROM import_runs")
+            conn.execute("DELETE FROM campaigns")
+            conn.execute(
+                "DELETE FROM work_logs WHERE recipient_id IS NOT NULL OR campaign_id IS NOT NULL"
+            )
+            return recipient_count
+
     def execute(self, sql, params=()):
         with self.connection() as conn:
             cur = conn.execute(sql, params)
