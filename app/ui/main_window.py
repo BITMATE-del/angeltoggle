@@ -13,6 +13,7 @@ from app.services.update_service import UpdateService
 from app.services.completion_export_service import CompletionExportService
 from app.services.telegram_check_service import TelegramCheckService, TelegramCheckError
 from app.services.telegram_check_api_service import TelegramCheckApiService
+from app.services.secret_store import save_telegram_check_api_token, has_telegram_check_api_token
 from app.ui.chat_viewer import ChatViewerDialog
 
 
@@ -3333,6 +3334,24 @@ class MainWindow(QMainWindow):
         form.addRow(api_save)
         l.addWidget(api_group)
 
+        check_api_group = QGroupBox("가입자 검수 API 설정")
+        cf = QFormLayout(check_api_group)
+        self.telegram_check_api_token = QLineEdit()
+        self.telegram_check_api_token.setEchoMode(QLineEdit.Password)
+        self.telegram_check_api_token.setPlaceholderText(
+            "API 암호를 한 번 입력하면 이 PC에 암호화 고정 저장됩니다."
+        )
+        self.telegram_check_api_status = QLabel(
+            "[ 저장됨 ]" if has_telegram_check_api_token() else "[ 미설정 ]"
+        )
+        self.telegram_check_api_status.setObjectName("보조")
+        check_api_save = QPushButton("[ 가입자 검수 API 암호 저장 및 고정 ]")
+        check_api_save.clicked.connect(self.save_telegram_check_api_secret)
+        cf.addRow("API 암호", self.telegram_check_api_token)
+        cf.addRow("상태", self.telegram_check_api_status)
+        cf.addRow(check_api_save)
+        l.addWidget(check_api_group)
+
         work_group = QGroupBox("연락처 작업 설정")
         wf = QFormLayout(work_group)
         self.max_contacts = QSpinBox()
@@ -3361,6 +3380,29 @@ class MainWindow(QMainWindow):
         self.db.set_setting("telegram_api_hash", self.api_hash.text().strip())
         self.logs.write("INFO", "설정", "텔레그램 API 설정 저장")
         QMessageBox.information(self, "저장 완료", "텔레그램 API 설정을 저장했습니다.")
+
+    def save_telegram_check_api_secret(self):
+        value = self.telegram_check_api_token.text().strip()
+        if not value:
+            QMessageBox.warning(
+                self,
+                "가입자 검수 API",
+                "API 암호를 입력해주세요."
+            )
+            return
+        try:
+            save_telegram_check_api_token(value)
+            self.telegram_check_api_token.clear()
+            self.telegram_check_api_status.setText("[ 저장됨 · 이 PC에 암호화 고정 ]")
+            self.logs.write("INFO", "가입자검수", "가입자 검수 API 암호 고정 저장 완료")
+            QMessageBox.information(
+                self,
+                "저장 완료",
+                "가입자 검수 API 암호를 이 PC에 암호화 저장했습니다.\n"
+                "이후에는 다시 입력하지 않아도 자동으로 사용됩니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "API 암호 저장 오류", str(e))
 
     def save_work_settings(self):
         self.db.set_setting("max_contacts_per_account", self.max_contacts.value())
