@@ -67,14 +67,22 @@ class TelegramService:
 
     def make_client(self, account):
         api_id, api_hash = self._api()
-        # Telethon 기본값은 짧은 FloodWait을 내부에서 자동 sleep 후 재개한다.
-        # 엔젤토글은 자동대기 대신 즉시 예외를 받아 해당 계정만 보류하고
-        # 다른 계정 Worker는 계속 진행하도록 한다.
+        # Telegram이 짧은 FloodWait을 요구하면 그 시간을 그대로 지킨 뒤
+        # 같은 계정에서 자동 재개한다. 긴 제한/PeerFlood 등은 예외로 올려
+        # 해당 계정만 중단하고 다른 계정 Worker는 계속 진행한다.
+        try:
+            threshold = int(
+                self.db.get_setting("telegram_short_flood_wait_seconds", "60") or 60
+            )
+        except Exception:
+            threshold = 60
+        threshold = max(0, min(threshold, 300))
+
         return TelegramClient(
             account["session_file"],
             api_id,
             api_hash,
-            flood_sleep_threshold=0,
+            flood_sleep_threshold=threshold,
         )
 
     async def connect_account(self, account):
