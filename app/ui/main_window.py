@@ -1305,17 +1305,44 @@ class MainWindow(QMainWindow):
                 f"추가 완료된 {result['ready']}명은 바로 게시물 발송 가능합니다."
             )
         elif kind == "발송":
+            paused_text = ""
+            for item in result.get("paused_accounts") or []:
+                paused_text += (
+                    f"\n- {item.get('label')} / {item.get('status')} / "
+                    f"{item.get('last_error') or '원인 메시지 없음'} / "
+                    f"잔여 {int(item.get('paused_count') or 0)}건"
+                )
+            message = (
+                f"발송 성공: {result['success']}명\n"
+                f"실패: {result['failed']}명\n"
+                f"보류: {result['remaining']}명"
+            )
+            if paused_text:
+                message += "\n\n[보류 원인]" + paused_text
             QMessageBox.information(
-                self, "게시물 발송 완료",
-                f"발송 성공: {result['success']}명\n실패: {result['failed']}명\n보류: {result['remaining']}명"
+                self, "게시물 발송 완료", message
             )
         elif kind == "전체":
             c = result["contact"]
             s = result["sent"]
+            paused_text = ""
+            for item in s.get("paused_accounts") or []:
+                paused_text += (
+                    f"\n- {item.get('label')} / {item.get('status')} / "
+                    f"{item.get('last_error') or '원인 메시지 없음'} / "
+                    f"잔여 {int(item.get('paused_count') or 0)}건"
+                )
+            message = (
+                f"연락처 추가: {c['ready']}명\n"
+                f"연락처 실패: {c['failed']}명\n"
+                f"게시물 발송 성공: {s['success']}명\n"
+                f"게시물 발송 실패: {s['failed']}명\n"
+                f"잔여/보류: {s.get('remaining', 0)}명"
+            )
+            if paused_text:
+                message += "\n\n[보류 원인]" + paused_text
             QMessageBox.information(
-                self, "전체 작업 완료",
-                f"연락처 추가: {c['ready']}명\n연락처 실패: {c['failed']}명\n"
-                f"게시물 발송 성공: {s['success']}명\n게시물 발송 실패: {s['failed']}명"
+                self, "전체 작업 완료", message
             )
         elif kind == "재시도":
             retry = result["retry"]
