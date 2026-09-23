@@ -7,6 +7,7 @@ import httpx
 
 from app.core.paths import EXPORTS_DIR
 from app.core.phone_utils import normalize_korean_phone
+from app.services.secret_store import load_telegram_check_api_token
 from app.services.telegram_check_service import (
     TelegramCheckError,
     UNIT_PRICE_TENTHS_KRW,
@@ -36,11 +37,11 @@ class TelegramCheckApiService:
         ).rstrip("/")
 
     def _token(self):
-        token = str(self.db.get_setting("telegram_check_api_token", "") or "").strip()
+        token = load_telegram_check_api_token()
         if not token:
             raise TelegramCheckError(
                 "API_TOKEN_REQUIRED",
-                "가입자 검수 API 암호가 설정되지 않았습니다. 설정 메뉴에서 먼저 저장해주세요.",
+                "가입자 검수 API 암호가 아직 고정 저장되지 않았습니다. 설정 메뉴에서 한 번 저장해주세요.",
             )
         return token
 
