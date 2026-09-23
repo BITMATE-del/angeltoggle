@@ -58,12 +58,19 @@ class DBImportService:
             if normalized in seen_in_file:
                 reason = "업로드 파일 내부 중복"
             else:
-                exists = self.db.fetchone(
-                    "SELECT id FROM recipients WHERE normalized_phone=? LIMIT 1",
+                reference = self.db.fetchone(
+                    "SELECT id FROM duplicate_check_db WHERE normalized_phone=? LIMIT 1",
                     (normalized,),
                 )
-                if exists:
-                    reason = "기존 데이터베이스 중복"
+                if reference:
+                    reason = "중복검수 DB 중복"
+                else:
+                    exists = self.db.fetchone(
+                        "SELECT id FROM recipients WHERE normalized_phone=? LIMIT 1",
+                        (normalized,),
+                    )
+                    if exists:
+                        reason = "기존 데이터베이스 중복"
 
             if reason:
                 stats["duplicate"] += 1
@@ -205,6 +212,13 @@ class DBImportService:
             source_file = source["source_file"] if source else "중복검수"
 
             for row in rows:
+                if row["reason"] == "중복검수 DB 중복":
+                    conn.execute(
+                        "UPDATE import_duplicates SET approved=0,processed=1 WHERE id=?",
+                        (row["id"],),
+                    )
+                    continue
+
                 conn.execute(
                     "INSERT INTO recipients(source_file,import_id,phone,normalized_phone,status,contact_status) "
                     "VALUES(?,?,?,?, 'PENDING','NOT_ADDED')",
@@ -281,3 +295,130 @@ class DBImportService:
             })
 
         return rows
+
+
+    def _duplicate_check_values(self, path):
+        suffix = Path(path).suffix.lower()
+        if suffix == ".xlsx":
+            wb = load_workbook(path, read_only=True, data_only=True)
+            try:
+                ws = wb.active
+                for row in ws.iter_rows(values_only=True):
+                    raw = row[0] if row else None
+                    if raw is not None:
+                        yield raw
+            finally:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+            return
+
+        if suffix == ".txt":
+            raw_bytes = Path(path).read_bytes()
+            text = None
+            for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+                try:
+                    text = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if text is None:
+                raise ValueError("TXT 파일 인코딩을 읽을 수 없습니다. UTF-8 또는 CP949로 저장해주세요.")
+
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in re.split(r"[,;\t]+", line) if p.strip()]
+                if len(parts) == 1:
+                    if normalize_phone(line):
+                        yield line
+                        continue
+                    tokens = [p.strip() for p in re.split(r"\s+", line) if p.strip()]
+                    matched = False
+                    for token in tokens:
+                        if normalize_phone(token):
+                            yield token
+                            matched = True
+                    if not matched:
+                        yield line
+                else:
+                    for part in parts:
+                        if normalize_phone(part):
+                            yield part
+                        else:
+                            candidates = re.findall(
+                                r"(?:\+?82[\s-]?)?0?1[016789](?:[\s-]?\d){7,8}",
+                                part,
+                            )
+                            if candidates:
+                                for candidate in candidates:
+                                    yield candidate
+                            else:
+                                yield part
+            return
+
+        raise ValueError("지원하지 않는 파일입니다. XLSX 또는 TXT 파일을 선택해주세요.")
+
+    def import_duplicate_check_file(self, path):
+        source_file = Path(path).name
+        total = added = duplicate = invalid = 0
+
+        with self.db.connection() as conn:
+            for raw in self._duplicate_check_values(path):
+                raw_text = str(raw).strip()
+                if not raw_text:
+                    continue
+
+                total += 1
+                normalized = normalize_phone(raw_text)
+                if not normalized:
+                    invalid += 1
+                    continue
+
+                exists = conn.execute(
+                    "SELECT id FROM duplicate_check_db WHERE normalized_phone=? LIMIT 1",
+                    (normalized,),
+                ).fetchone()
+                if exists:
+                    duplicate += 1
+                    continue
+
+                conn.execute(
+                    "INSERT INTO duplicate_check_db(source_file,raw_phone,normalized_phone) "
+                    "VALUES(?,?,?)",
+                    (source_file, raw_text, normalized),
+                )
+                added += 1
+
+        self.logs.write(
+            "INFO",
+            "중복검수DB",
+            f"중복검수 DB 업로드 / 전체 {total} / 추가 {added} / 중복 {duplicate} / 오류 {invalid}",
+        )
+        return {
+            "total": total,
+            "added": added,
+            "duplicate": duplicate,
+            "invalid": invalid,
+        }
+
+    def duplicate_check_rows(self):
+        return self.db.fetchall(
+            "SELECT id,source_file,raw_phone,normalized_phone,created_at "
+            "FROM duplicate_check_db ORDER BY id DESC"
+        )
+
+    def delete_duplicate_check_rows(self, ids):
+        ids = sorted({int(x) for x in ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        return self.db.execute_rowcount(
+            f"DELETE FROM duplicate_check_db WHERE id IN ({placeholders})",
+            ids,
+        )
+
+    def clear_duplicate_check_db(self):
+        return self.db.execute_rowcount("DELETE FROM duplicate_check_db")
