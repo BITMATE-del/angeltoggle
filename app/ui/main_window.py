@@ -917,7 +917,27 @@ class MainWindow(QMainWindow):
             (latest["id"],),
         )["c"]
         if ready <= 0:
-            QMessageBox.warning(self, "발송 불가", "게시물을 발송할 연락처가 없습니다.")
+            waiting_contact = self.db.fetchone(
+                "SELECT COUNT(*) c FROM campaign_recipients "
+                "WHERE campaign_id=? AND contact_status IN ('WAITING','CONTACT_PAUSED') "
+                "AND status IN ('ASSIGNED','SEND_PAUSED')",
+                (latest["id"],),
+            )
+            waiting_count = int(waiting_contact["c"] or 0) if waiting_contact else 0
+
+            if waiting_count > 0 or latest["status"] in ("CONTACT_WAITING", "CONTACT_RUNNING"):
+                QMessageBox.warning(
+                    self,
+                    "연락처 재추가 필요",
+                    "현재 작업에는 새 담당 계정에서 연락처 추가가 필요한 DB가 있습니다.\n\n"
+                    "[ 1단계 · 연락처 추가 시작 ] 또는 [ 전체 자동 진행 ]을 먼저 눌러주세요."
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "발송 불가",
+                    "현재 작업에서 게시물을 발송할 연락처가 없습니다."
+                )
             return
 
         if not self.db.get_setting("postbot_link"):
@@ -2658,16 +2678,37 @@ class MainWindow(QMainWindow):
                 return None
 
             unassigned = self.send_engine.cancel_active_assignments(
-                account_ids=account_ids
+                account_ids=account_ids,
+                reassign_waiting=True,
             )
 
         batch = self.session_import.delete_accounts_batch(account_ids)
+
+        handoff = {
+            "assigned": 0,
+            "campaign_ids": [],
+            "waiting": 0,
+        }
+        if unassigned > 0:
+            try:
+                handoff = self.send_engine.auto_assign_reassignment_waiting()
+                if handoff.get("campaign_ids"):
+                    self.current_campaign_id = handoff["campaign_ids"][-1]
+            except Exception as handoff_error:
+                self.logs.write(
+                    "WARNING",
+                    "승계",
+                    f"계정 삭제 후 잔여 DB 자동 재배정 실패: {handoff_error}",
+                )
 
         return {
             "deleted": int(batch.get("deleted", 0) or 0),
             "session_failed": int(batch.get("session_failed", 0) or 0),
             "missing": int(batch.get("missing", 0) or 0),
             "unassigned": unassigned,
+            "handoff_assigned": int(handoff.get("assigned", 0) or 0),
+            "handoff_waiting": int(handoff.get("waiting", 0) or 0),
+            "handoff_campaign_ids": handoff.get("campaign_ids") or [],
         }
 
     def delete_selected_account(self):
@@ -2711,7 +2752,14 @@ class MainWindow(QMainWindow):
 
             msg = f"계정 {result['deleted']}개를 삭제했습니다."
             if result["unassigned"]:
-                msg += f"\n진행 중 배정 {result['unassigned']}건을 취소했습니다."
+                msg += f"\n삭제 계정 잔여 DB {result['unassigned']}건을 분리했습니다."
+            if result.get("handoff_assigned"):
+                msg += (
+                    f"\n정상 계정에 {result['handoff_assigned']}건을 자동 재배정했습니다."
+                    "\n새 담당 계정에서 연락처 추가부터 다시 진행해야 합니다."
+                )
+            if result.get("handoff_waiting"):
+                msg += f"\n재배정 대기 잔여 {result['handoff_waiting']}건"
             if result["session_failed"]:
                 msg += f"\n세션파일 {result['session_failed']}개는 삭제하지 못했습니다."
             if result.get("missing"):
