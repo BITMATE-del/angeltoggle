@@ -358,12 +358,13 @@ class TelegramCheckService:
 
             success = len(rows_to_insert)
             missing = max(0, requested - success)
+            refund_tenths = missing * UNIT_PRICE_TENTHS_KRW
             status = "COMPLETED" if missing == 0 else "PARTIAL"
             conn.execute(
                 "UPDATE telegram_check_tasks SET success_count=?,missing_count=?,"
-                "status=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP "
-                "WHERE id=?",
-                (success, missing, status, task_id),
+                "refund_tenths_krw=?,status=?,completed_at=CURRENT_TIMESTAMP,"
+                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (success, missing, refund_tenths, status, task_id),
             )
 
         if self.logs:
