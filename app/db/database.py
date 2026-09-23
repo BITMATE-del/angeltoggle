@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS import_duplicates (
     FOREIGN KEY(import_id) REFERENCES import_runs(id)
 );
 
+CREATE TABLE IF NOT EXISTS duplicate_check_db (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_file TEXT,
+    raw_phone TEXT,
+    normalized_phone TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_duplicate_check_db_phone
+ON duplicate_check_db(normalized_phone);
+
 CREATE TABLE IF NOT EXISTS campaigns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
