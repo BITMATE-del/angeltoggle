@@ -277,6 +277,12 @@ class TelegramCheckService:
                         out.write(value + "\n")
                 offset += len(rows)
 
+        self.db.execute(
+            "UPDATE telegram_check_tasks SET status='PROCESSING',"
+            "started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=?",
+            (task_id,),
+        )
         if self.logs:
             self.logs.write(
                 "INFO", "가입자검수",
