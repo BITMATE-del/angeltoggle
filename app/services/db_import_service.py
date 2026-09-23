@@ -29,6 +29,7 @@ class DBImportService:
             "total": 0,
             "valid": 0,
             "duplicate": 0,
+            "protected_duplicate": 0,
             "invalid": 0,
             "duplicate_numbers": [],
         }
@@ -74,6 +75,8 @@ class DBImportService:
 
             if reason:
                 stats["duplicate"] += 1
+                if reason == "중복검수 DB 중복":
+                    stats["protected_duplicate"] += 1
                 stats["duplicate_numbers"].append(normalized)
                 self.db.execute(
                     "INSERT INTO import_duplicates(import_id,raw_phone,normalized_phone,reason) "
@@ -111,7 +114,8 @@ class DBImportService:
             "INFO",
             "DB",
             f"DB 업로드 완료 / 전체 {stats['total']} / 즉시사용 {stats['valid']} / "
-            f"중복검수 {stats['duplicate']} / 오류 {stats['invalid']}",
+            f"중복 {stats['duplicate']} / 중복검수DB 제외 {stats['protected_duplicate']} / "
+            f"오류 {stats['invalid']}",
         )
         return stats
 
