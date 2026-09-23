@@ -2465,6 +2465,8 @@ class MainWindow(QMainWindow):
         import_result.clicked.connect(self.import_telegram_check_result)
         export_result = QPushButton("[ 결과 다운로드 ]")
         export_result.clicked.connect(self.export_telegram_check_result)
+        cancel = QPushButton("[ 작업 취소 ]")
+        cancel.clicked.connect(self.cancel_telegram_check_task)
         refresh = QPushButton("[ 검수 내역 새로고침 ]")
         refresh.clicked.connect(self.refresh_telegram_check_tasks)
         guide = QPushButton("[ 이용 안내 ]")
@@ -2476,6 +2478,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(save_target)
         controls.addWidget(import_result)
         controls.addWidget(export_result)
+        controls.addWidget(cancel)
         controls.addWidget(refresh)
         controls.addWidget(guide)
         controls.addStretch()
@@ -2634,6 +2637,29 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "결과 다운로드 오류", str(e))
+
+    def cancel_telegram_check_task(self):
+        task_id = self._selected_telegram_check_task_id()
+        if not task_id:
+            QMessageBox.information(self, "작업 취소", "취소할 검수 작업을 선택해주세요.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "검수 작업 취소",
+            f"작업 #{task_id}을 취소하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            result = self.telegram_check.cancel_task(task_id)
+            self.telegram_check_summary.setText(
+                f"[검수 취소] 작업 #{task_id}\n상태: {result['status']}"
+            )
+            self.refresh_telegram_check_tasks()
+        except Exception as e:
+            QMessageBox.critical(self, "작업 취소 오류", str(e))
 
     def refresh_telegram_check_tasks(self):
         if not hasattr(self, "telegram_check_table"):
