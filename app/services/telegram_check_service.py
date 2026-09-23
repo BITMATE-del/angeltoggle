@@ -10,6 +10,7 @@ from app.core.paths import EXPORTS_DIR
 MIN_COUNT = 100
 MAX_COUNT = 1_000_000
 UNIT_PRICE_TENTHS_KRW = 6
+PHONE_COLUMN_NAMES = {"전화번호", "휴대폰", "휴대폰번호", "핸드폰", "핸드폰번호", "phone", "phone_number", "mobile", "tel"}
 
 
 class TelegramCheckError(Exception):
@@ -46,14 +47,32 @@ class TelegramCheckService:
         self.db = db
         self.logs = logs
 
+    def _detect_phone_column(self, first_row):
+        cells = ["" if value is None else str(value).strip() for value in first_row]
+        lowered_names = {name.lower() for name in PHONE_COLUMN_NAMES}
+
+        for index, value in enumerate(cells):
+            if value.lower() in lowered_names:
+                return index, True
+
+        for index, value in enumerate(cells):
+            if normalize_korean_phone(value):
+                return index, False
+
+        raise TelegramCheckError(
+            "PHONE_COLUMN_NOT_FOUND",
+            "전화번호 열을 찾지 못했습니다. 첫 줄에 '전화번호' 제목을 넣거나 "
+            "첫 줄부터 전화번호가 있는 열을 사용해주세요.",
+        )
+
     def _iter_values(self, path):
         ext = Path(path).suffix.lower()
 
-        if ext in {".txt", ".csv"}:
+        if ext == ".txt":
             opened = None
             for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
                 try:
-                    opened = open(path, "r", encoding=encoding, newline="")
+                    opened = open(path, "r", encoding=encoding)
                     opened.read(2048)
                     opened.seek(0)
                     break
@@ -61,29 +80,61 @@ class TelegramCheckService:
                     if opened:
                         opened.close()
                     opened = None
-
             if opened is None:
                 raise TelegramCheckError("FILE_ENCODING", "파일 인코딩을 읽을 수 없습니다.")
 
             with opened:
-                if ext == ".txt":
-                    for line in opened:
-                        value = line.strip()
-                        if value:
-                            yield value
-                else:
-                    for row in csv.reader(opened):
-                        if row and str(row[0]).strip():
-                            yield str(row[0]).strip()
+                for line in opened:
+                    value = line.strip()
+                    if value:
+                        yield value
             return
+
+        if ext == ".csv":
+            last_error = None
+            for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+                try:
+                    with open(path, "r", encoding=encoding, newline="") as opened:
+                        reader = csv.reader(opened)
+                        first_row = next(reader, None)
+                        if not first_row:
+                            raise TelegramCheckError("EMPTY_FILE", "빈 파일입니다.")
+                        column_index, has_header = self._detect_phone_column(first_row)
+
+                        if not has_header:
+                            value = first_row[column_index] if column_index < len(first_row) else ""
+                            if str(value).strip():
+                                yield str(value).strip()
+
+                        for row in reader:
+                            value = row[column_index] if column_index < len(row) else ""
+                            if str(value).strip():
+                                yield str(value).strip()
+                    return
+                except UnicodeDecodeError as exc:
+                    last_error = exc
+                    continue
+            raise TelegramCheckError("FILE_ENCODING", "CSV 파일 인코딩을 읽을 수 없습니다.") from last_error
 
         if ext == ".xlsx":
             wb = load_workbook(path, read_only=True, data_only=True)
             try:
                 ws = wb.active
-                for row in ws.iter_rows(values_only=True):
-                    if row and row[0] is not None and str(row[0]).strip():
-                        yield str(row[0]).strip()
+                rows = ws.iter_rows(values_only=True)
+                first_row = next(rows, None)
+                if not first_row:
+                    raise TelegramCheckError("EMPTY_FILE", "빈 파일입니다.")
+                column_index, has_header = self._detect_phone_column(first_row)
+
+                if not has_header:
+                    value = first_row[column_index] if column_index < len(first_row) else ""
+                    if str(value).strip():
+                        yield str(value).strip()
+
+                for row in rows:
+                    value = row[column_index] if column_index < len(row) else ""
+                    if value is not None and str(value).strip():
+                        yield str(value).strip()
             finally:
                 wb.close()
             return
