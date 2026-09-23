@@ -2959,6 +2959,14 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if getattr(self, "telegram_check_worker_running", False):
+            QMessageBox.information(
+                self,
+                "검수 진행중",
+                "이미 가입자 검수 작업이 진행 중입니다."
+            )
+            return
+
         try:
             ok, reason = self.telegram_check.can_start(task_id)
             if not ok:
@@ -2974,22 +2982,50 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+            if not has_telegram_check_api_token():
+                QMessageBox.warning(
+                    self,
+                    "API 암호 필요",
+                    "가입자 검수 API 암호가 아직 저장되지 않았습니다.\n\n"
+                    "설정 → 가입자 검수 API 설정에서 API 암호를 한 번 저장해주세요."
+                )
+                return
+
+            self.telegram_check_worker_running = True
+            self.current_telegram_check_task_id = task_id
             self.telegram_check_summary.setText(
-                f"[검수 준비 완료] 작업 #{task_id}\n"
+                f"[검수 시작] 작업 #{task_id}\n"
                 f"실제 검수 수량: {int(summary['charged_count'] or 0):,}건\n"
                 f"예상 금액: {float(summary['amount_krw']):,.1f} KRW\n\n"
-                "현재 버전에서는 외부 검수 API 자동 실행이 연결되어 있지 않습니다.\n"
-                "[ 검수 대상 TXT 저장 ]으로 대상 파일을 만든 뒤 결과 CSV를 가져오세요."
+                "외부 검수 API에 작업을 등록하고 있습니다..."
             )
-            QMessageBox.information(
-                self,
-                "검수 준비 완료",
-                "검수 작업을 시작할 수 있는 상태입니다.\n\n"
-                "현재 버전은 외부 API 자동 실행이 연결되어 있지 않아, "
-                "검수 대상 TXT 저장 → 결과 CSV 가져오기 방식으로 진행합니다."
-            )
+            self.refresh_telegram_check_tasks()
+
+            threading.Thread(
+                target=self._run_telegram_check_api_worker,
+                args=(task_id,),
+                daemon=True,
+            ).start()
         except Exception as e:
+            self.telegram_check_worker_running = False
             QMessageBox.critical(self, "검수 시작 오류", str(e))
+
+    def _run_telegram_check_api_worker(self, task_id):
+        def progress(data):
+            self.bridge.작업완료.emit("가입자검수진행", data)
+
+        try:
+            result = self.telegram_check_api.run_task(task_id, progress=progress)
+            self.bridge.작업완료.emit("가입자검수완료", result)
+        except Exception as e:
+            self.bridge.작업완료.emit(
+                "가입자검수오류",
+                {
+                    "task_id": task_id,
+                    "error": str(e),
+                    "code": getattr(e, "code", "API_ERROR"),
+                },
+            )
 
     def export_telegram_check_target(self):
         task_id = self._selected_telegram_check_task_id()
