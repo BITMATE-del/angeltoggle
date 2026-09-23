@@ -2459,6 +2459,12 @@ class MainWindow(QMainWindow):
 
         upload = QPushButton("[ 전화번호 파일 업로드 ]")
         upload.clicked.connect(self.prepare_telegram_check_file)
+        save_target = QPushButton("[ 검수 대상 TXT 저장 ]")
+        save_target.clicked.connect(self.export_telegram_check_target)
+        import_result = QPushButton("[ 결과 CSV 가져오기 ]")
+        import_result.clicked.connect(self.import_telegram_check_result)
+        export_result = QPushButton("[ 결과 다운로드 ]")
+        export_result.clicked.connect(self.export_telegram_check_result)
         refresh = QPushButton("[ 검수 내역 새로고침 ]")
         refresh.clicked.connect(self.refresh_telegram_check_tasks)
         guide = QPushButton("[ 이용 안내 ]")
@@ -2467,6 +2473,9 @@ class MainWindow(QMainWindow):
         controls.addWidget(QLabel("검수 조건"))
         controls.addWidget(self.telegram_check_filter)
         controls.addWidget(upload)
+        controls.addWidget(save_target)
+        controls.addWidget(import_result)
+        controls.addWidget(export_result)
         controls.addWidget(refresh)
         controls.addWidget(guide)
         controls.addStretch()
@@ -2524,6 +2533,107 @@ class MainWindow(QMainWindow):
             self.telegram_check_summary.setText(f"[오류] {e}")
             QMessageBox.critical(self, "가입자 검수 오류", str(e))
 
+    def _selected_telegram_check_task_id(self):
+        if hasattr(self, "telegram_check_table"):
+            row = self.telegram_check_table.currentRow()
+            if row >= 0:
+                item = self.telegram_check_table.item(row, 0)
+                if item:
+                    try:
+                        return int(item.text())
+                    except Exception:
+                        pass
+        return self.current_telegram_check_task_id
+
+    def export_telegram_check_target(self):
+        task_id = self._selected_telegram_check_task_id()
+        if not task_id:
+            QMessageBox.information(self, "검수 대상", "먼저 검수 파일을 업로드해주세요.")
+            return
+        try:
+            ok, reason = self.telegram_check.can_start(task_id)
+            if not ok:
+                QMessageBox.warning(self, "검수 대상 저장 불가", reason)
+                return
+            default_name = f"AngelToggle_검수대상_{task_id}.txt"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "검수 대상 TXT 저장", default_name, "Text (*.txt)"
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".txt"):
+                path += ".txt"
+            saved = self.telegram_check.export_api_input_txt(task_id, path)
+            QMessageBox.information(
+                self, "저장 완료",
+                f"검수 대상 전화번호 파일을 저장했습니다.\n\n{saved}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "검수 대상 저장 오류", str(e))
+
+    def import_telegram_check_result(self):
+        task_id = self._selected_telegram_check_task_id()
+        if not task_id:
+            QMessageBox.information(self, "결과 가져오기", "먼저 검수 작업을 선택해주세요.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "검수 결과 CSV 선택", "", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            result = self.telegram_check.import_result_csv(task_id, path)
+            self.current_telegram_check_task_id = task_id
+            self.telegram_check_summary.setText(
+                f"[결과 처리 완료] 작업 #{task_id}\n"
+                f"검수 수량: {int(result['charged_count'] or 0):,}건\n"
+                f"결과 수량: {int(result['success_count'] or 0):,}건\n"
+                f"누락 수량: {int(result['missing_count'] or 0):,}건\n"
+                f"상태: {result['status']}"
+            )
+            self.refresh_telegram_check_tasks()
+        except Exception as e:
+            QMessageBox.critical(self, "결과 가져오기 오류", str(e))
+
+    def export_telegram_check_result(self):
+        task_id = self._selected_telegram_check_task_id()
+        if not task_id:
+            QMessageBox.information(self, "결과 다운로드", "검수 작업을 선택해주세요.")
+            return
+        try:
+            summary = self.telegram_check.task_summary(task_id)
+            if summary["status"] not in ("COMPLETED", "PARTIAL"):
+                QMessageBox.information(
+                    self, "결과 다운로드",
+                    "아직 결과가 준비되지 않은 작업입니다."
+                )
+                return
+
+            path, selected = QFileDialog.getSaveFileName(
+                self,
+                "검수 결과 저장",
+                f"AngelToggle_검수결과_{task_id}.xlsx",
+                "Excel (*.xlsx);;CSV (*.csv)",
+            )
+            if not path:
+                return
+
+            if "CSV" in selected or path.lower().endswith(".csv"):
+                if not path.lower().endswith(".csv"):
+                    path += ".csv"
+                saved, count = self.telegram_check.export_result_csv(task_id, path)
+            else:
+                if not path.lower().endswith(".xlsx"):
+                    path += ".xlsx"
+                saved, count = self.telegram_check.export_result_xlsx(task_id, path)
+
+            QMessageBox.information(
+                self, "결과 다운로드 완료",
+                f"검수 결과 {count:,}건을 저장했습니다.\n\n{saved}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "결과 다운로드 오류", str(e))
+
     def refresh_telegram_check_tasks(self):
         if not hasattr(self, "telegram_check_table"):
             return
@@ -2531,7 +2641,8 @@ class MainWindow(QMainWindow):
         self.telegram_check_table.setRowCount(len(rows))
         status_map = {
             "DRAFT":"검수 준비", "PENDING":"검수 대기", "PROCESSING":"검수 진행중",
-            "COMPLETED":"검수 완료", "FAILED":"검수 실패", "CANCELLED":"검수 취소"
+            "COMPLETED":"검수 완료", "PARTIAL":"검수 완료(일부 누락)",
+            "FAILED":"검수 실패", "CANCELLED":"검수 취소"
         }
         filter_map = {"1D":"1일", "3D":"3일", "7D":"7일", "ALL":"전체"}
         for r, row in enumerate(rows):
