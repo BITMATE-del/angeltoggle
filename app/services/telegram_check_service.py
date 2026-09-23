@@ -6,7 +6,7 @@ from openpyxl import load_workbook
 from app.core.phone_utils import normalize_korean_phone
 
 
-MIN_COUNT = 5000
+MIN_COUNT = 100
 MAX_COUNT = 1_000_000
 UNIT_PRICE_TENTHS_KRW = 6
 
@@ -187,7 +187,7 @@ class TelegramCheckService:
         row = self.task_summary(task_id)
         count = int(row["charged_count"] or 0)
         if count < MIN_COUNT:
-            return False, "최소 검수 수량은 5,000건입니다."
+            return False, "최소 검수 수량은 100건입니다."
         if count > MAX_COUNT:
             return False, "1회 최대 검수 수량은 1,000,000건입니다."
         return True, ""
