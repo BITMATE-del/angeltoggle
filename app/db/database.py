@@ -168,6 +168,67 @@ CREATE TABLE IF NOT EXISTS work_logs (
     message TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS telegram_check_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_file TEXT,
+    api_task_id TEXT,
+    total_input_count INTEGER NOT NULL DEFAULT 0,
+    valid_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    invalid_count INTEGER NOT NULL DEFAULT 0,
+    charged_count INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    missing_count INTEGER NOT NULL DEFAULT 0,
+    filter_type TEXT NOT NULL DEFAULT 'ALL',
+    amount_tenths_krw INTEGER NOT NULL DEFAULT 0,
+    refund_tenths_krw INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'DRAFT',
+    result_file_path TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_check_tasks_status
+ON telegram_check_tasks(status, created_at);
+
+CREATE TABLE IF NOT EXISTS telegram_check_inputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    raw_phone TEXT,
+    normalized_phone TEXT,
+    display_phone TEXT,
+    input_status TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(task_id) REFERENCES telegram_check_tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_check_inputs_task
+ON telegram_check_inputs(task_id, input_status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_check_inputs_unique_valid
+ON telegram_check_inputs(task_id, normalized_phone)
+WHERE input_status='VALID';
+
+CREATE TABLE IF NOT EXISTS telegram_check_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    phone_number TEXT NOT NULL,
+    telegram_check_status TEXT,
+    telegram_id TEXT,
+    telegram_username TEXT,
+    telegram_active TEXT,
+    raw_status TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(task_id) REFERENCES telegram_check_tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_check_results_task
+ON telegram_check_results(task_id, phone_number);
 """
 
 class Database:
