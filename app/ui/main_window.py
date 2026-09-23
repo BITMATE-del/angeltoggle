@@ -228,6 +228,7 @@ class MainWindow(QMainWindow):
             "> 고객 DB",
             "> PostBot 게시물",
             "> 텔레그램 계정",
+            "> 텔레그램 가입자 검수",
             "> 작업 로그",
             "> 설정",
         ])
@@ -246,6 +247,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.db_page())
         self.pages.addWidget(self.postbot_page())
         self.pages.addWidget(self.accounts_page())
+        self.pages.addWidget(self.telegram_check_page())
         self.pages.addWidget(self.log_page())
         self.pages.addWidget(self.settings_page())
 
