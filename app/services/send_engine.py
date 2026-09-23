@@ -1862,7 +1862,7 @@ class SendEngine:
             account_id=account_id, campaign_id=campaign_id,
         )
 
-    def cancel_active_assignments(self, account_ids=None, campaign_id=None):
+    def cancel_active_assignments(self, account_ids=None, campaign_id=None, reassign_waiting=False):
         account_ids = [int(x) for x in (account_ids or [])]
         where = [
             "cr.status != 'MESSAGE_SENT'",
@@ -1902,16 +1902,35 @@ class SendEngine:
                     "WHERE campaign_id=? AND recipient_id=? AND status!='MESSAGE_SENT'",
                     (row["campaign_id"], row["recipient_id"]),
                 )
-                conn.execute(
-                    "UPDATE recipients SET "
-                    "assigned_account_id=NULL,status='PENDING',contact_status='NOT_ADDED',"
-                    "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
-                    "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
-                    "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
-                    "updated_at=CURRENT_TIMESTAMP "
-                    "WHERE id=? AND status!='MESSAGE_SENT'",
-                    (row["recipient_id"],),
-                )
+                if reassign_waiting:
+                    conn.execute(
+                        "UPDATE recipients SET "
+                        "assigned_account_id=NULL,status='REASSIGN_WAITING',contact_status='NOT_ADDED',"
+                        "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                        "contact_added_at=NULL,error_code='ACCOUNT_DELETED',"
+                        "error_message='담당 계정 삭제로 정상 계정 재배정 대기',"
+                        "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                        "handoff_status='WAITING',handoff_source_campaign_id=?,"
+                        "handoff_from_account_id=?,handoff_reason='담당 계정 삭제로 재배정',"
+                        "updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=? AND status!='MESSAGE_SENT'",
+                        (
+                            row["campaign_id"],
+                            row["assigned_account_id"],
+                            row["recipient_id"],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE recipients SET "
+                        "assigned_account_id=NULL,status='PENDING',contact_status='NOT_ADDED',"
+                        "telegram_uid=NULL,telegram_username=NULL,contact_name=NULL,"
+                        "contact_added_at=NULL,error_code=NULL,error_message=NULL,"
+                        "telegram_message_id=NULL,processed_at=NULL,sent_at=NULL,"
+                        "updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=? AND status!='MESSAGE_SENT'",
+                        (row["recipient_id"],),
+                    )
 
             for cid in campaign_ids:
                 remaining = conn.execute(
@@ -1940,7 +1959,11 @@ class SendEngine:
         self.logs.write(
             "INFO",
             "배정",
-            f"진행 중 배정 {len(rows)}건 취소 / 고객 DB를 대기상태로 복구",
+            (
+                f"진행 중 배정 {len(rows)}건 취소 / "
+                + ("삭제 계정 잔여 DB를 재배정 대기로 이동" if reassign_waiting
+                   else "고객 DB를 대기상태로 복구")
+            ),
         )
         return len(rows)
 
