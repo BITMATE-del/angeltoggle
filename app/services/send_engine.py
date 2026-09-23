@@ -1435,13 +1435,50 @@ class SendEngine:
             "UPDATE campaigns SET status=?,success_count=?,failed_count=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
             (final_status, success, failed, campaign_id),
         )
+        paused_accounts = self.db.fetchall(
+            "SELECT a.id,a.phone,a.username,a.name,a.status,a.last_error,"
+            "COUNT(cr.recipient_id) paused_count "
+            "FROM campaign_recipients cr "
+            "JOIN telegram_accounts a ON a.id=cr.assigned_account_id "
+            "WHERE cr.campaign_id=? "
+            "AND cr.status IN ('SEND_PAUSED','UNCERTAIN') "
+            "GROUP BY a.id,a.phone,a.username,a.name,a.status,a.last_error "
+            "ORDER BY a.id",
+            (campaign_id,),
+        )
+        paused_summary = []
+        for row in paused_accounts:
+            paused_summary.append({
+                "account_id": int(row["id"]),
+                "label": row["phone"] or row["username"] or row["name"] or f"계정-{row['id']}",
+                "status": row["status"] or "",
+                "last_error": row["last_error"] or "",
+                "paused_count": int(row["paused_count"] or 0),
+            })
+
         self.logs.write(
             "SUCCESS" if success else "WARNING", "발송",
             f"게시물 발송 종료 / 성공 {success}명 / 실패 {failed}명 / 보류 {remaining}명",
             campaign_id=campaign_id,
         )
+        for item in paused_summary:
+            self.logs.write(
+                "WARNING",
+                "보류원인",
+                f"{item['label']} / {item['status']} / "
+                f"{item['last_error'] or '원인 메시지 없음'} / "
+                f"잔여 {item['paused_count']}건",
+                account_id=item["account_id"],
+                campaign_id=campaign_id,
+            )
+
         self._sync_retry_history(campaign_id)
-        return {"success": success, "failed": failed, "remaining": remaining}
+        return {
+            "success": success,
+            "failed": failed,
+            "remaining": remaining,
+            "paused_accounts": paused_summary,
+        }
 
     def _run_send_sector(self, campaign_id, sector_id, accounts):
         limited = list(accounts)[:10]
