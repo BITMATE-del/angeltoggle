@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
             "> 대시보드",
             "> 작업 실행",
             "> 고객 DB",
+            "> 중복검수 DB",
             "> PostBot 게시물",
             "> 텔레그램 계정",
             "> 텔레그램 가입자 검수",
@@ -245,6 +246,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.dashboard())
         self.pages.addWidget(self.work_page())
         self.pages.addWidget(self.db_page())
+        self.pages.addWidget(self.duplicate_check_db_page())
         self.pages.addWidget(self.postbot_page())
         self.pages.addWidget(self.accounts_page())
         self.pages.addWidget(self.telegram_check_page())
@@ -1816,6 +1818,7 @@ class MainWindow(QMainWindow):
                 f"전체: {s['total']}명\n"
                 f"즉시 사용 가능: {s['valid']}명\n"
                 f"중복: {s['duplicate']}명\n"
+                f"중복검수 DB 자동 제외: {s.get('protected_duplicate', 0)}명\n"
                 f"번호 오류: {s['invalid']}명"
             )
 
@@ -1826,8 +1829,10 @@ class MainWindow(QMainWindow):
                 box.setWindowTitle("중복번호 확인")
                 box.setIcon(QMessageBox.Warning)
                 box.setText(
-                    f"중복 번호 {s['duplicate']}개가 있습니다.\n\n"
-                    "빨간색으로 표시된 중복 번호를 제거하시겠습니까?"
+                    f"중복 번호 {s['duplicate']}개가 있습니다.\n"
+                    f"(중복검수 DB 자동 제외 {s.get('protected_duplicate', 0)}개 포함)\n\n"
+                    "중복검수 DB와 겹치는 번호는 항상 제외됩니다.\n"
+                    "그 외 중복 번호를 제거하시겠습니까?"
                 )
                 remove_btn = box.addButton("중복 제거", QMessageBox.AcceptRole)
                 keep_btn = box.addButton("중복 유지", QMessageBox.RejectRole)
@@ -2010,6 +2015,183 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "배정 DB 복구 오류", str(e))
+
+    def duplicate_check_db_page(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.addWidget(self.title(
+            "중복검수 DB",
+            "C:\\엔젤토글> 고객 DB 업로드 시 자동 제외할 기준 DB 관리"
+        ))
+
+        info = QLabel(
+            "여기에 저장된 전화번호는 고객 DB를 새로 업로드할 때 자동으로 중복 검사됩니다.\n"
+            "중복검수 DB와 일치하는 번호는 고객 DB에 추가되지 않습니다."
+        )
+        info.setObjectName("상태패널")
+        info.setWordWrap(True)
+        l.addWidget(info)
+
+        buttons = QHBoxLayout()
+
+        upload = QPushButton("[ 중복검수 DB 업로드 ]")
+        upload.clicked.connect(self.import_duplicate_check_db)
+
+        delete_selected = QPushButton("[ 선택 삭제 ]")
+        delete_selected.clicked.connect(self.delete_selected_duplicate_check_db)
+
+        clear_all = QPushButton("[ 전체 삭제 ]")
+        clear_all.clicked.connect(self.clear_duplicate_check_db)
+
+        refresh = QPushButton("[ 새로고침 ]")
+        refresh.clicked.connect(self.refresh_duplicate_check_db)
+
+        buttons.addWidget(upload)
+        buttons.addWidget(delete_selected)
+        buttons.addWidget(clear_all)
+        buttons.addWidget(refresh)
+        buttons.addStretch()
+        l.addLayout(buttons)
+
+        self.duplicate_check_summary = QLabel("중복검수 DB를 불러오는 중입니다.")
+        self.duplicate_check_summary.setObjectName("상태패널")
+        l.addWidget(self.duplicate_check_summary)
+
+        self.duplicate_check_table = QTableWidget(0, 5)
+        self.duplicate_check_table.setHorizontalHeaderLabels([
+            "번호", "원본 번호", "정규화 번호", "업로드 파일", "등록일"
+        ])
+        self.duplicate_check_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.duplicate_check_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.duplicate_check_table.horizontalHeader().setStretchLastSection(True)
+        l.addWidget(self.duplicate_check_table, 1)
+
+        QTimer.singleShot(0, self.refresh_duplicate_check_db)
+        return w
+
+    def import_duplicate_check_db(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "중복검수 DB 파일 선택",
+            "",
+            "중복검수 DB (*.xlsx *.txt);;Excel (*.xlsx);;텍스트 (*.txt)"
+        )
+        if not path:
+            return
+
+        try:
+            result = self.db_import.import_duplicate_check_file(path)
+            self.refresh_duplicate_check_db()
+            QMessageBox.information(
+                self,
+                "중복검수 DB 업로드 완료",
+                f"전체: {result['total']:,}건\n"
+                f"추가: {result['added']:,}건\n"
+                f"기존 중복: {result['duplicate']:,}건\n"
+                f"번호 오류: {result['invalid']:,}건"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "중복검수 DB 업로드 오류", str(e))
+
+    def refresh_duplicate_check_db(self):
+        if not hasattr(self, "duplicate_check_table"):
+            return
+
+        rows = self.db_import.duplicate_check_rows()
+        self.duplicate_check_table.setRowCount(len(rows))
+
+        for r, row in enumerate(rows):
+            values = [
+                row["id"],
+                row["raw_phone"] or "",
+                row["normalized_phone"] or "",
+                row["source_file"] or "",
+                row["created_at"] or "",
+            ]
+            for col, value in enumerate(values):
+                self.duplicate_check_table.setItem(r, col, QTableWidgetItem(str(value)))
+
+        self.duplicate_check_table.resizeColumnsToContents()
+        self.duplicate_check_summary.setText(
+            f"[중복검수 DB] 현재 등록 {len(rows):,}건\n"
+            "고객 DB 업로드 시 이 목록과 중복되는 번호는 자동 제외됩니다."
+        )
+
+    def delete_selected_duplicate_check_db(self):
+        if not hasattr(self, "duplicate_check_table"):
+            return
+
+        rows = sorted({
+            index.row()
+            for index in self.duplicate_check_table.selectionModel().selectedRows()
+        })
+        if not rows:
+            QMessageBox.information(self, "선택 삭제", "삭제할 번호를 먼저 선택해주세요.")
+            return
+
+        ids = []
+        for row in rows:
+            item = self.duplicate_check_table.item(row, 0)
+            if item:
+                try:
+                    ids.append(int(item.text()))
+                except Exception:
+                    pass
+
+        if not ids:
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "중복검수 DB 선택 삭제",
+            f"선택한 {len(ids):,}건을 중복검수 DB에서 삭제하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            deleted = self.db_import.delete_duplicate_check_rows(ids)
+            self.logs.write("INFO", "중복검수DB", f"선택 {deleted}건 삭제")
+            self.refresh_duplicate_check_db()
+            QMessageBox.information(
+                self,
+                "삭제 완료",
+                f"중복검수 DB {deleted:,}건을 삭제했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "중복검수 DB 삭제 오류", str(e))
+
+    def clear_duplicate_check_db(self):
+        row = self.db.fetchone("SELECT COUNT(*) c FROM duplicate_check_db")
+        count = int(row["c"] or 0)
+        if count <= 0:
+            QMessageBox.information(self, "전체 삭제", "삭제할 중복검수 DB가 없습니다.")
+            return
+
+        answer = QMessageBox.warning(
+            self,
+            "중복검수 DB 전체 삭제",
+            f"중복검수 DB {count:,}건을 모두 삭제하시겠습니까?\n\n"
+            "이후 고객 DB 업로드부터는 삭제된 번호들이 중복검수 기준에서 제외됩니다.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            deleted = self.db_import.clear_duplicate_check_db()
+            self.logs.write("WARNING", "중복검수DB", f"전체 {deleted}건 삭제")
+            self.refresh_duplicate_check_db()
+            QMessageBox.information(
+                self,
+                "전체 삭제 완료",
+                f"중복검수 DB {deleted:,}건을 삭제했습니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "중복검수 DB 전체 삭제 오류", str(e))
 
     def postbot_page(self):
         w = QWidget()
