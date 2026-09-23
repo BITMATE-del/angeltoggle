@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from app.core.paths import EXPORTS_DIR
+from app.core.phone_utils import normalize_korean_phone
 from app.services.telegram_check_service import (
     TelegramCheckError,
     UNIT_PRICE_TENTHS_KRW,
@@ -223,10 +224,14 @@ class TelegramCheckApiService:
             f"결과 CSV를 읽을 수 없습니다: {last_error}",
         )
 
-    def _merge_batch_results(self, task_id, paths):
-        seen = set()
-        inserts = []
+    def _merge_batch_results(self, task_id, paths, failed_phones=None):
+        failed_phones = {
+            normalize_korean_phone(value)
+            for value in (failed_phones or [])
+            if normalize_korean_phone(value)
+        }
 
+        matched = {}
         for path in paths:
             rows = self._decode_csv(Path(path).read_bytes())
             first = True
@@ -241,14 +246,9 @@ class TelegramCheckApiService:
                         continue
 
                 raw_phone = row[0] if len(row) > 0 else ""
-                normalized_display = format_domestic_phone(raw_phone)
-                if not normalized_display:
+                normalized = normalize_korean_phone(raw_phone)
+                if not normalized:
                     continue
-
-                unique_key = normalized_display.replace("-", "")
-                if unique_key in seen:
-                    continue
-                seen.add(unique_key)
 
                 telegram_id = str(row[1] or "").strip() if len(row) > 1 else ""
                 telegram_username = str(row[2] or "").strip() if len(row) > 2 else ""
@@ -259,50 +259,89 @@ class TelegramCheckApiService:
                 if telegram_username == "0":
                     telegram_username = ""
 
-                inserts.append((
-                    task_id,
-                    normalized_display,
-                    "가입",
-                    telegram_id or None,
-                    telegram_username or None,
-                    telegram_active or None,
-                    "API_RESULT",
-                ))
+                matched[normalized] = {
+                    "telegram_id": telegram_id or None,
+                    "telegram_username": telegram_username or None,
+                    "telegram_active": telegram_active or None,
+                }
+
+        inputs = self.db.fetchall(
+            "SELECT normalized_phone,display_phone FROM telegram_check_inputs "
+            "WHERE task_id=? AND input_status='VALID' ORDER BY id",
+            (task_id,),
+        )
+
+        inserts = []
+        joined_count = 0
+        not_joined_count = 0
+        uncertain_count = 0
+
+        for row in inputs:
+            normalized = normalize_korean_phone(row["normalized_phone"])
+            display = row["display_phone"] or format_domestic_phone(normalized)
+
+            if normalized in failed_phones:
+                status = "확인불가"
+                telegram_id = telegram_username = telegram_active = None
+                raw_status = "BATCH_FAILED"
+                uncertain_count += 1
+            elif normalized in matched:
+                item = matched[normalized]
+                status = "가입"
+                telegram_id = item["telegram_id"]
+                telegram_username = item["telegram_username"]
+                telegram_active = item["telegram_active"]
+                raw_status = "API_RESULT"
+                joined_count += 1
+            else:
+                status = "미가입"
+                telegram_id = telegram_username = telegram_active = None
+                raw_status = "NOT_IN_EXPORT"
+                not_joined_count += 1
+
+            inserts.append((
+                task_id,
+                display,
+                status,
+                telegram_id,
+                telegram_username,
+                telegram_active,
+                raw_status,
+            ))
 
         with self.db.connection() as conn:
             conn.execute("DELETE FROM telegram_check_results WHERE task_id=?", (task_id,))
-            for start in range(0, len(inserts), 2000):
+            for offset in range(0, len(inserts), 2000):
                 conn.executemany(
                     "INSERT INTO telegram_check_results("
                     "task_id,phone_number,telegram_check_status,telegram_id,"
                     "telegram_username,telegram_active,raw_status"
                     ") VALUES(?,?,?,?,?,?,?)",
-                    inserts[start:start + 2000],
+                    inserts[offset:offset + 2000],
                 )
 
-            requested = int(
-                conn.execute(
-                    "SELECT charged_count FROM telegram_check_tasks WHERE id=?",
-                    (task_id,),
-                ).fetchone()[0]
-                or 0
-            )
-            success = len(inserts)
-            missing = max(0, requested - success)
-            refund_tenths = missing * UNIT_PRICE_TENTHS_KRW
-            status = "COMPLETED" if missing == 0 else "PARTIAL"
+            requested = len(inserts)
+            failed_count = uncertain_count
+            processed_count = max(0, requested - failed_count)
+            refund_tenths = failed_count * UNIT_PRICE_TENTHS_KRW
+            status = "COMPLETED" if failed_count == 0 else "PARTIAL"
 
             conn.execute(
                 "UPDATE telegram_check_tasks SET success_count=?,missing_count=?,"
                 "refund_tenths_krw=?,status=?,completed_at=CURRENT_TIMESTAMP,"
                 "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (success, missing, refund_tenths, status, task_id),
+                (processed_count, failed_count, refund_tenths, status, task_id),
             )
 
         return {
-            "success_count": len(inserts),
-            "missing_count": max(0, requested - len(inserts)),
-            "status": status,
+            "requested_count": len(inserts),
+            "processed_count": max(0, len(inserts) - uncertain_count),
+            "joined_count": joined_count,
+            "not_joined_count": not_joined_count,
+            "uncertain_count": uncertain_count,
+            "success_count": max(0, len(inserts) - uncertain_count),
+            "missing_count": uncertain_count,
+            "status": "COMPLETED" if uncertain_count == 0 else "PARTIAL",
         }
 
     def run_task(self, task_id, progress=None):
@@ -339,73 +378,85 @@ class TelegramCheckApiService:
                 f"외부 API 검수 시작 / 작업 #{task_id} / {count:,}건",
             )
 
-        paths = []
+        result_paths = []
+        failed_phones = set()
         batch_no = 0
         current = []
 
-        try:
-            for phone in self._task_phones(task_id):
-                current.append(phone)
-                if len(current) >= BATCH_SIZE:
-                    batch_no += 1
-                    api_task_id = self._create_batch(task_id, batch_no, current)
-                    if progress:
-                        progress({
-                            "stage": "submitted",
-                            "task_id": task_id,
-                            "batch_no": batch_no,
-                            "api_task_id": api_task_id,
-                            "count": len(current),
-                        })
-                    self._wait_batch(task_id, batch_no, api_task_id, progress)
-                    paths.append(
-                        self._download_batch_result(task_id, batch_no, api_task_id)
-                    )
-                    current = []
-
-            if current:
-                batch_no += 1
-                api_task_id = self._create_batch(task_id, batch_no, current)
+        def process_batch(phones, number):
+            try:
+                api_task_id = self._create_batch(task_id, number, phones)
                 if progress:
                     progress({
                         "stage": "submitted",
                         "task_id": task_id,
-                        "batch_no": batch_no,
+                        "batch_no": number,
                         "api_task_id": api_task_id,
-                        "count": len(current),
+                        "count": len(phones),
                     })
-                self._wait_batch(task_id, batch_no, api_task_id, progress)
-                paths.append(
-                    self._download_batch_result(task_id, batch_no, api_task_id)
+
+                self._wait_batch(task_id, number, api_task_id, progress)
+                result_paths.append(
+                    self._download_batch_result(task_id, number, api_task_id)
                 )
-
-            result = self._merge_batch_results(task_id, paths)
-            result["task_id"] = task_id
-            result["batch_count"] = batch_no
-
-            if self.logs:
-                self.logs.write(
-                    "SUCCESS",
-                    "가입자검수",
-                    f"외부 API 검수 완료 / 작업 #{task_id} / "
-                    f"결과 {result['success_count']:,} / 누락 {result['missing_count']:,}",
+                return True
+            except Exception as exc:
+                self.db.execute(
+                    "UPDATE telegram_check_batches SET status='FAILED',error_message=?,"
+                    "updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND batch_no=?",
+                    (str(exc)[:1000], task_id, number),
                 )
-            return result
+                for phone in phones:
+                    normalized = normalize_korean_phone(phone)
+                    if normalized:
+                        failed_phones.add(normalized)
+                if self.logs:
+                    self.logs.write(
+                        "ERROR",
+                        "가입자검수",
+                        f"외부 API 배치 실패 / 작업 #{task_id} / 배치 #{number} / "
+                        f"{len(phones):,}건 / {exc}",
+                    )
+                if progress:
+                    progress({
+                        "stage": "batch_failed",
+                        "task_id": task_id,
+                        "batch_no": number,
+                        "count": len(phones),
+                        "error": str(exc),
+                    })
+                return False
 
-        except Exception as exc:
-            self.db.execute(
-                "UPDATE telegram_check_tasks SET status='FAILED',error_code=?,"
-                "error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (
-                    getattr(exc, "code", "API_ERROR"),
-                    str(exc)[:1000],
-                    task_id,
-                ),
+        for phone in self._task_phones(task_id):
+            current.append(phone)
+            if len(current) >= BATCH_SIZE:
+                batch_no += 1
+                process_batch(list(current), batch_no)
+                current = []
+
+        if current:
+            batch_no += 1
+            process_batch(list(current), batch_no)
+
+        if batch_no == 0:
+            raise TelegramCheckError("NO_INPUT", "검수할 정상 전화번호가 없습니다.")
+
+        result = self._merge_batch_results(
+            task_id,
+            result_paths,
+            failed_phones=failed_phones,
+        )
+        result["task_id"] = task_id
+        result["batch_count"] = batch_no
+
+        if self.logs:
+            level = "SUCCESS" if result["status"] == "COMPLETED" else "WARNING"
+            self.logs.write(
+                level,
+                "가입자검수",
+                f"외부 API 검수 완료 / 작업 #{task_id} / "
+                f"가입 {result['joined_count']:,} / 미가입 {result['not_joined_count']:,} / "
+                f"확인불가 {result['uncertain_count']:,}",
             )
-            if self.logs:
-                self.logs.write(
-                    "ERROR",
-                    "가입자검수",
-                    f"외부 API 검수 실패 / 작업 #{task_id} / {exc}",
-                )
-            raise
+        return result
+
