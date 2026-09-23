@@ -2854,6 +2854,8 @@ class MainWindow(QMainWindow):
 
         upload = QPushButton("[ 전화번호 파일 업로드 ]")
         upload.clicked.connect(self.prepare_telegram_check_file)
+        start_check = QPushButton("[ 검수 시작 ]")
+        start_check.clicked.connect(self.start_telegram_check_task)
         save_target = QPushButton("[ 검수 대상 TXT 저장 ]")
         save_target.clicked.connect(self.export_telegram_check_target)
         import_result = QPushButton("[ 결과 CSV 가져오기 ]")
@@ -2870,6 +2872,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(QLabel("검수 조건"))
         controls.addWidget(self.telegram_check_filter)
         controls.addWidget(upload)
+        controls.addWidget(start_check)
         controls.addWidget(save_target)
         controls.addWidget(import_result)
         controls.addWidget(export_result)
@@ -2942,6 +2945,48 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
         return self.current_telegram_check_task_id
+
+    def start_telegram_check_task(self):
+        task_id = self._selected_telegram_check_task_id()
+        if not task_id:
+            QMessageBox.information(
+                self,
+                "검수 시작",
+                "먼저 전화번호 파일을 업로드하거나 검수 작업을 선택해주세요."
+            )
+            return
+
+        try:
+            ok, reason = self.telegram_check.can_start(task_id)
+            if not ok:
+                QMessageBox.warning(self, "검수 시작 불가", reason)
+                return
+
+            summary = self.telegram_check.task_summary(task_id)
+            if summary["status"] in ("COMPLETED", "PARTIAL", "CANCELLED"):
+                QMessageBox.information(
+                    self,
+                    "검수 시작",
+                    "이미 완료되었거나 취소된 작업입니다."
+                )
+                return
+
+            self.telegram_check_summary.setText(
+                f"[검수 준비 완료] 작업 #{task_id}\n"
+                f"실제 검수 수량: {int(summary['charged_count'] or 0):,}건\n"
+                f"예상 금액: {float(summary['amount_krw']):,.1f} KRW\n\n"
+                "현재 버전에서는 외부 검수 API 자동 실행이 연결되어 있지 않습니다.\n"
+                "[ 검수 대상 TXT 저장 ]으로 대상 파일을 만든 뒤 결과 CSV를 가져오세요."
+            )
+            QMessageBox.information(
+                self,
+                "검수 준비 완료",
+                "검수 작업을 시작할 수 있는 상태입니다.\n\n"
+                "현재 버전은 외부 API 자동 실행이 연결되어 있지 않아, "
+                "검수 대상 TXT 저장 → 결과 CSV 가져오기 방식으로 진행합니다."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "검수 시작 오류", str(e))
 
     def export_telegram_check_target(self):
         task_id = self._selected_telegram_check_task_id()
