@@ -1524,6 +1524,40 @@ class SendEngine:
                 (campaign_id, account_id),
             )
 
+            if not targets:
+                return
+
+            try:
+                prepared_post = await self.telegram.prepare_postbot_inline_result(
+                    client,
+                    campaign["postbot_username"],
+                    campaign["post_code"],
+                )
+                self.logs.write(
+                    "INFO",
+                    "발송",
+                    f"PostBot Inline Query 1회 준비 완료 / "
+                    f"대상 {len(targets)}명 / PostBot={prepared_post['post_code']}",
+                    account_id=account_id,
+                    campaign_id=campaign_id,
+                )
+            except RecipientError as e:
+                self._pause_send_account(
+                    campaign_id,
+                    account_id,
+                    e.code,
+                    str(e),
+                )
+                return
+            except AccountWorkerError as e:
+                self._pause_send_account(
+                    campaign_id,
+                    account_id,
+                    e.code,
+                    str(e),
+                )
+                return
+
             for target in targets:
                 recipient_id = target["recipient_id"]
                 uid = str(target["telegram_uid"] or "").strip()
@@ -1609,17 +1643,15 @@ class SendEngine:
                     self.logs.write(
                         "INFO",
                         "발송",
-                        f"PostBot Inline Query 시작 / UID={uid}",
+                        f"준비된 PostBot 게시물 즉시 전송 / UID={uid}",
                         account_id=account_id,
                         campaign_id=campaign_id,
                         recipient_id=recipient_id,
                     )
 
-                    sent = await self.telegram.send_postbot_inline(
-                        client,
+                    sent = await self.telegram.send_prepared_postbot_inline(
                         peer,
-                        campaign["postbot_username"],
-                        campaign["post_code"],
+                        prepared_post,
                     )
                     message_id = sent["message_id"]
                     postbot_code = sent["post_code"]
