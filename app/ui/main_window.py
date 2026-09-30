@@ -1270,7 +1270,8 @@ class MainWindow(QMainWindow):
                     f"[ 상태 ] 정상 · PostBot 게시물 조회 성공\n"
                     f"게시물 코드: {info.get('post_code', '')}\n"
                     f"조회 결과: {info.get('result_count', 0)}개\n"
-                    f"게시물: {info.get('title', '')}"
+                    f"게시물: {info.get('title', '')}\n"
+                    f"확인 계정: {info.get('checked_account', '')}"
                 )
                 self.postbot_status.setText(text)
                 self.logs.write(
@@ -2365,12 +2366,12 @@ class MainWindow(QMainWindow):
             self.postbot_status.setText("[ 상태 ] 오류 · 게시물 코드/링크가 비어 있습니다.")
             return
 
-        account = self.db.fetchone(
+        accounts = self.db.fetchall(
             "SELECT * FROM telegram_accounts WHERE enabled=1 "
             "AND status NOT IN ('SEND_RESTRICTED','PEER_FLOOD','FLOOD_WAIT','SESSION_ERROR','STOPPED','WORKER_ERROR') "
-            "ORDER BY id LIMIT 1"
+            "ORDER BY id"
         )
-        if not account:
+        if not accounts:
             self.postbot_status.setText("[ 상태 ] 확인 불가 · 사용 가능한 텔레그램 계정이 없습니다.")
             QMessageBox.warning(
                 self,
@@ -2379,24 +2380,46 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.postbot_status.setText("[ 상태 ] PostBot 게시물을 불러오는 중...")
+        self.postbot_status.setText("[ 상태 ] 정상 계정으로 PostBot 게시물을 확인하는 중...")
         threading.Thread(
             target=self._postbot_check_worker,
-            args=(dict(account), username, post_value),
+            args=([dict(a) for a in accounts], username, post_value),
             daemon=True,
         ).start()
 
-    def _postbot_check_worker(self, account, username, post_value):
+    def _postbot_check_worker(self, accounts, username, post_value):
         async def runner():
-            client = await self.send_engine.telegram.connect_account(account)
-            try:
-                return await self.send_engine.telegram.check_postbot(
-                    client,
-                    username,
-                    post_value,
+            errors = []
+            for account in accounts:
+                label = (
+                    account.get("phone")
+                    or account.get("username")
+                    or account.get("name")
+                    or f"계정-{account.get('id')}"
                 )
-            finally:
-                await client.disconnect()
+                client = None
+                try:
+                    client = await self.send_engine.telegram.connect_account(account)
+                    result = await self.send_engine.telegram.check_postbot(
+                        client,
+                        username,
+                        post_value,
+                    )
+                    result["checked_account"] = label
+                    return result
+                except Exception as e:
+                    errors.append(f"{label}: {type(e).__name__}: {e}")
+                finally:
+                    if client is not None:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+
+            raise RuntimeError(
+                "모든 정상 계정에서 PostBot 확인에 실패했습니다. "
+                + " | ".join(errors[:5])
+            )
 
         try:
             result = asyncio.run(runner())
