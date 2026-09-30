@@ -199,6 +199,34 @@ class TelegramService:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("CONTACT_LIST_FAILED", name)
 
+    async def resolve_bot_entity(self, client, bot_username):
+        username = (bot_username or "@PostBot").strip()
+        if not username.startswith("@"):
+            username = "@" + username
+
+        try:
+            return await client.get_entity(username)
+        except ValueError as direct_error:
+            # 일부 세션에서는 ResolveUsername이 일시적으로 실패해도
+            # 이미 대화한 봇 엔티티가 로컬 대화 목록에 남아 있을 수 있다.
+            wanted = username.lstrip("@").lower()
+            try:
+                async for dialog in client.iter_dialogs(limit=300):
+                    entity = getattr(dialog, "entity", None)
+                    entity_username = str(getattr(entity, "username", "") or "").lower()
+                    if entity is not None and entity_username == wanted:
+                        return entity
+            except Exception:
+                pass
+
+            detail = str(direct_error).strip() or "Telegram에서 해당 봇 계정을 찾지 못했습니다."
+            raise RecipientError(
+                "POSTBOT_BOT_NOT_FOUND",
+                f"이 Telegram 세션에서 {username} 계정을 확인하지 못했습니다. "
+                f"같은 계정으로 Telegram에서 {username}을 한 번 열고 /start 후 다시 확인해주세요. "
+                f"Telegram 응답: {detail}",
+            ) from direct_error
+
     async def check_postbot(self, client, bot_username, post_value):
         bot_username = (bot_username or "@PostBot").strip()
         if not bot_username.startswith("@"):
@@ -209,14 +237,7 @@ class TelegramService:
             raise RecipientError("POSTBOT_INVALID_CODE", "PostBot 게시물 코드가 비어 있습니다.")
 
         try:
-            try:
-                bot = await client.get_entity(bot_username)
-            except ValueError as e:
-                detail = str(e).strip() or "Telegram에서 해당 PostBot 계정을 찾지 못했습니다."
-                raise RecipientError(
-                    "POSTBOT_BOT_NOT_FOUND",
-                    f"PostBot 계정 확인 실패: {bot_username} / {detail}",
-                ) from e
+            bot = await self.resolve_bot_entity(client, bot_username)
 
             results = await client.inline_query(bot, post_code)
             if not results:
