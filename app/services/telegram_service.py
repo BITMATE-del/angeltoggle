@@ -24,6 +24,22 @@ def phone_to_e164(phone):
     return converted
 
 
+def normalize_username(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    raw = re.sub(
+        r"^https?://(?:t\.me|telegram\.me)/",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    raw = raw.split("?", 1)[0].split("#", 1)[0]
+    raw = raw.strip().strip("/").lstrip("@").strip()
+    return raw.lower()
+
+
 def normalize_post_code(value):
     raw = (value or "").strip()
     if not raw:
@@ -199,55 +215,253 @@ class TelegramService:
                 raise AccountWorkerError("ACCOUNT_ERROR", name)
             raise RecipientError("CONTACT_LIST_FAILED", name)
 
+    def _postbot_resolve_log(self, step, ok, detail, entity=None):
+        entity_id = None
+        entity_username = None
+        entity_type = None
+        if entity is not None:
+            entity_id = (
+                getattr(entity, "id", None)
+                or getattr(entity, "user_id", None)
+                or getattr(entity, "channel_id", None)
+                or getattr(entity, "chat_id", None)
+            )
+            entity_username = getattr(entity, "username", None)
+            entity_type = type(entity).__name__
+
+        if ok:
+            self.logs.write(
+                "SUCCESS",
+                "PostBot Resolve",
+                f"[PostBot Resolve Success] step={step} / "
+                f"username={('@' + entity_username) if entity_username else detail} / "
+                f"entity_id={entity_id or ''} / entity_type={entity_type or ''}",
+            )
+        else:
+            self.logs.write(
+                "WARNING",
+                "PostBot Resolve",
+                f"[PostBot Resolve] {step} failed: {detail}",
+            )
+
+    def _postbot_access_error(self, error):
+        name = type(error).__name__
+        detail = str(error).strip()
+        upper = f"{name} {detail}".upper()
+
+        if any(
+            key in upper
+            for key in (
+                "AUTHKEY",
+                "SESSIONREVOKED",
+                "USERDEACTIVATED",
+                "AUTH_KEY",
+                "SESSION_REVOKED",
+            )
+        ):
+            return AccountWorkerError(
+                "SESSION_ERROR",
+                "Telegram 로그인 세션이 유효하지 않습니다. 계정을 다시 연결해주세요.",
+            )
+
+        if any(
+            key in upper
+            for key in (
+                "PRIVACY",
+                "FORBIDDEN",
+                "BANNED",
+                "CHAT_WRITE",
+                "USER_BANNED",
+                "BOT_INLINE_DISABLED",
+            )
+        ):
+            return RecipientError(
+                "POSTBOT_ACCESS_DENIED",
+                "현재 Telegram 계정에서 해당 게시물에 접근할 수 없습니다.",
+            )
+
+        return None
+
     async def resolve_bot_entity(self, client, bot_username):
-        username = (bot_username or "@PostBot").strip()
-        if not username.startswith("@"):
-            username = "@" + username
-
-        try:
-            return await client.get_entity(username)
-        except ValueError as direct_error:
-            # 일부 세션에서는 ResolveUsername이 일시적으로 실패해도
-            # 이미 대화한 봇 엔티티가 로컬 대화 목록에 남아 있을 수 있다.
-            wanted = username.lstrip("@").lower()
-            try:
-                async for dialog in client.iter_dialogs(limit=300):
-                    entity = getattr(dialog, "entity", None)
-                    entity_username = str(getattr(entity, "username", "") or "").lower()
-                    if entity is not None and entity_username == wanted:
-                        return entity
-            except Exception:
-                pass
-
-            detail = str(direct_error).strip() or "Telegram에서 해당 봇 계정을 찾지 못했습니다."
+        normalized = normalize_username(bot_username)
+        if not normalized:
             raise RecipientError(
-                "POSTBOT_BOT_NOT_FOUND",
-                f"이 Telegram 세션에서 {username} 계정을 확인하지 못했습니다. "
-                f"같은 계정으로 Telegram에서 {username}을 한 번 열고 /start 후 다시 확인해주세요. "
-                f"Telegram 응답: {detail}",
-            ) from direct_error
+                "POSTBOT_INVALID_USERNAME",
+                "PostBot 사용자명이 비어 있습니다.",
+            )
+
+        display_username = "@" + normalized
+        stage_errors = []
+
+        # 1차: 세션 entity cache + Telegram lookup
+        try:
+            entity = await client.get_input_entity(display_username)
+            self._postbot_resolve_log(
+                "1.get_input_entity",
+                True,
+                display_username,
+                entity,
+            )
+            return entity
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("1.get_input_entity", detail))
+            self._postbot_resolve_log("1.get_input_entity", False, detail)
+
+        # 2차: full entity 조회
+        try:
+            entity = await client.get_entity(display_username)
+            self._postbot_resolve_log(
+                "2.get_entity",
+                True,
+                display_username,
+                entity,
+            )
+            return entity
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("2.get_entity", detail))
+            self._postbot_resolve_log("2.get_entity", False, detail)
+
+        # 3차: Telegram username 직접 resolve
+        try:
+            resolved = await client(
+                functions.contacts.ResolveUsernameRequest(
+                    username=normalized,
+                )
+            )
+
+            candidates = list(getattr(resolved, "users", []) or [])
+            candidates += list(getattr(resolved, "chats", []) or [])
+
+            entity = None
+            for item in candidates:
+                username = normalize_username(getattr(item, "username", ""))
+                if username == normalized:
+                    entity = item
+                    break
+
+            if entity is None:
+                peer = getattr(resolved, "peer", None)
+                if peer is not None:
+                    entity = await client.get_input_entity(peer)
+
+            if entity is None:
+                raise ValueError("ResolveUsernameRequest returned no matching entity")
+
+            self._postbot_resolve_log(
+                "3.ResolveUsernameRequest",
+                True,
+                display_username,
+                entity,
+            )
+            return entity
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("3.ResolveUsernameRequest", detail))
+            self._postbot_resolve_log("3.ResolveUsernameRequest", False, detail)
+
+        # 4차: dialogs를 실제로 refresh한 뒤 username 비교
+        try:
+            dialogs = await client.get_dialogs(limit=None)
+            for dialog in dialogs:
+                entity = getattr(dialog, "entity", None)
+                username = normalize_username(getattr(entity, "username", ""))
+                if entity is not None and username == normalized:
+                    self._postbot_resolve_log(
+                        "4.dialogs_lookup",
+                        True,
+                        display_username,
+                        entity,
+                    )
+                    return entity
+
+            raise ValueError(
+                f"dialogs refreshed but @{normalized} was not found"
+            )
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("4.dialogs_lookup", detail))
+            self._postbot_resolve_log("4.dialogs_lookup", False, detail)
+
+        # dialogs refresh가 entity cache를 갱신했을 수 있으므로 마지막 재시도
+        try:
+            entity = await client.get_input_entity(display_username)
+            self._postbot_resolve_log(
+                "5.get_input_entity_after_refresh",
+                True,
+                display_username,
+                entity,
+            )
+            return entity
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("5.get_input_entity_after_refresh", detail))
+            self._postbot_resolve_log(
+                "5.get_input_entity_after_refresh",
+                False,
+                detail,
+            )
+
+        raw_detail = " | ".join(
+            f"{step}: {detail}"
+            for step, detail in stage_errors
+        )
+        self.logs.write(
+            "ERROR",
+            "PostBot Resolve",
+            f"PostBot resolve all fallbacks failed / "
+            f"username={display_username} / {raw_detail}",
+        )
+        raise RecipientError(
+            "POSTBOT_BOT_NOT_FOUND",
+            "PostBot 계정을 Telegram에서 확인하지 못했습니다. "
+            "잠시 후 다시 시도해주세요.",
+        )
 
     async def check_postbot(self, client, bot_username, post_value):
-        bot_username = (bot_username or "@PostBot").strip()
-        if not bot_username.startswith("@"):
-            bot_username = "@" + bot_username
+        normalized = normalize_username(bot_username)
+        bot_username = "@" + (normalized or "postbot")
 
         post_code = normalize_post_code(post_value)
         if not post_code:
-            raise RecipientError("POSTBOT_INVALID_CODE", "PostBot 게시물 코드가 비어 있습니다.")
+            raise RecipientError(
+                "POSTBOT_INVALID_CODE",
+                "게시물 코드 또는 링크를 입력해주세요.",
+            )
 
         try:
             bot = await self.resolve_bot_entity(client, bot_username)
-
             results = await client.inline_query(bot, post_code)
+
             if not results:
                 raise RecipientError(
                     "POSTBOT_RESULT_NOT_FOUND",
-                    f"PostBot 인라인 결과가 없습니다. bot={bot_username} / code={post_code}",
+                    "PostBot 계정은 확인했지만 해당 게시물을 찾지 못했습니다. "
+                    "게시물 코드 또는 링크를 확인해주세요.",
                 )
 
             first = results[0]
-            title = getattr(first, "title", None) or getattr(first, "description", None) or "게시물 확인됨"
+            title = (
+                getattr(first, "title", None)
+                or getattr(first, "description", None)
+                or "게시물 확인됨"
+            )
             return {
                 "ok": True,
                 "post_code": post_code,
@@ -258,77 +472,114 @@ class TelegramService:
 
         except RecipientError:
             raise
+        except AccountWorkerError:
+            raise
         except errors.FloodWaitError as e:
-            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
-        except errors.PeerFloodError as e:
-            raise AccountWorkerError("PEER_FLOOD", str(e))
-        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
-            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
+            raise AccountWorkerError(
+                "FLOOD_WAIT",
+                f"Telegram 요청 제한으로 {e.seconds}초 대기가 필요합니다.",
+            )
+        except errors.PeerFloodError:
+            raise AccountWorkerError(
+                "PEER_FLOOD",
+                "Telegram 계정에 요청 제한이 발생했습니다.",
+            )
+        except (
+            errors.AuthKeyUnregisteredError,
+            errors.SessionRevokedError,
+            errors.UserDeactivatedError,
+        ):
+            raise AccountWorkerError(
+                "SESSION_ERROR",
+                "Telegram 로그인 세션이 유효하지 않습니다. 계정을 다시 연결해주세요.",
+            )
         except Exception as e:
-            name = type(e).__name__
+            mapped = self._postbot_access_error(e)
+            if mapped:
+                raise mapped
+
             detail = str(e).strip()
-            if "Flood" in name or "AuthKey" in name or "Session" in name:
-                raise AccountWorkerError(
-                    "ACCOUNT_ERROR",
-                    f"{name}: {detail}" if detail else name,
-                )
+            self.logs.write(
+                "ERROR",
+                "PostBot",
+                f"PostBot 상태체크 원문 오류: "
+                f"{type(e).__name__}: {detail or type(e).__name__}",
+            )
             raise RecipientError(
                 "POSTBOT_CHECK_FAILED",
-                f"{name}: {detail}" if detail else name,
-            )
+                "PostBot 게시물 확인 중 오류가 발생했습니다. "
+                "작업 로그에서 상세 원인을 확인해주세요.",
+            ) from e
 
     async def prepare_postbot_inline_result(self, client, bot_username, post_value):
-        bot_username = (bot_username or "@PostBot").strip()
-        if not bot_username.startswith("@"):
-            bot_username = "@" + bot_username
+        normalized = normalize_username(bot_username)
+        bot_username = "@" + (normalized or "postbot")
 
         post_code = normalize_post_code(post_value)
         if not post_code:
-            raise RecipientError("POSTBOT_INVALID_CODE", "PostBot 게시물 코드가 비어 있습니다.")
+            raise RecipientError(
+                "POSTBOT_INVALID_CODE",
+                "게시물 코드 또는 링크를 입력해주세요.",
+            )
 
         try:
-            try:
-                bot = await client.get_entity(bot_username)
-            except ValueError as e:
-                detail = str(e).strip() or "Telegram에서 해당 PostBot 계정을 찾지 못했습니다."
-                raise RecipientError(
-                    "POSTBOT_BOT_NOT_FOUND",
-                    f"PostBot 계정 확인 실패: {bot_username} / {detail}",
-                ) from e
-
+            bot = await self.resolve_bot_entity(client, bot_username)
             results = await client.inline_query(bot, post_code)
+
             if not results:
                 raise RecipientError(
                     "POSTBOT_RESULT_NOT_FOUND",
-                    "PostBot 인라인 결과가 없습니다."
+                    "PostBot 계정은 확인했지만 해당 게시물을 찾지 못했습니다. "
+                    "게시물 코드 또는 링크를 확인해주세요.",
                 )
 
             return {
                 "result": results[0],
                 "post_code": post_code,
                 "result_count": len(results),
+                "bot_username": bot_username,
             }
 
         except RecipientError:
             raise
+        except AccountWorkerError:
+            raise
         except errors.FloodWaitError as e:
-            raise AccountWorkerError("FLOOD_WAIT", f"FloodWait {e.seconds}초")
-        except errors.PeerFloodError as e:
-            raise AccountWorkerError("PEER_FLOOD", str(e))
-        except (errors.AuthKeyUnregisteredError, errors.SessionRevokedError) as e:
-            raise AccountWorkerError("SESSION_ERROR", type(e).__name__)
+            raise AccountWorkerError(
+                "FLOOD_WAIT",
+                f"Telegram 요청 제한으로 {e.seconds}초 대기가 필요합니다.",
+            )
+        except errors.PeerFloodError:
+            raise AccountWorkerError(
+                "PEER_FLOOD",
+                "Telegram 계정에 요청 제한이 발생했습니다.",
+            )
+        except (
+            errors.AuthKeyUnregisteredError,
+            errors.SessionRevokedError,
+            errors.UserDeactivatedError,
+        ):
+            raise AccountWorkerError(
+                "SESSION_ERROR",
+                "Telegram 로그인 세션이 유효하지 않습니다. 계정을 다시 연결해주세요.",
+            )
         except Exception as e:
-            name = type(e).__name__
+            mapped = self._postbot_access_error(e)
+            if mapped:
+                raise mapped
+
             detail = str(e).strip()
-            if "Flood" in name or "AuthKey" in name or "Session" in name:
-                raise AccountWorkerError(
-                    "ACCOUNT_ERROR",
-                    f"{name}: {detail}" if detail else name,
-                )
+            self.logs.write(
+                "ERROR",
+                "PostBot",
+                f"PostBot 발송 준비 원문 오류: "
+                f"{type(e).__name__}: {detail or type(e).__name__}",
+            )
             raise RecipientError(
                 "POSTBOT_CHECK_FAILED",
-                f"{name}: {detail}" if detail else name,
-            )
+                "PostBot 게시물 확인 중 오류가 발생했습니다. "
+                "작업 로그에서 상세 원인을 확인해주세요.",
+            ) from e
 
     async def send_prepared_postbot_inline(self, peer, prepared):
         try:
