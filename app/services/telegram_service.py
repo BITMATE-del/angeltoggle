@@ -235,7 +235,8 @@ class TelegramService:
                 "PostBot Resolve",
                 f"[PostBot Resolve Success] step={step} / "
                 f"username={('@' + entity_username) if entity_username else detail} / "
-                f"entity_id={entity_id or ''} / entity_type={entity_type or ''}",
+                f"entity_id={entity_id or ''} / entity_type={entity_type or ''} / "
+                f"method={step.split('.', 1)[-1]}",
             )
         else:
             self.logs.write(
@@ -370,15 +371,34 @@ class TelegramService:
             stage_errors.append(("3.ResolveUsernameRequest", detail))
             self._postbot_resolve_log("3.ResolveUsernameRequest", False, detail)
 
-        # 4차: dialogs를 실제로 refresh한 뒤 username 비교
+        # 4차: dialogs를 실제로 refresh하여 Telegram entity cache를 갱신
+        dialogs = None
         try:
             dialogs = await client.get_dialogs(limit=None)
+            self._postbot_resolve_log(
+                "4.dialogs_refresh",
+                True,
+                f"{display_username} / dialogs={len(dialogs)}",
+            )
+        except Exception as e:
+            access_error = self._postbot_access_error(e)
+            if access_error:
+                raise access_error
+            detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
+            stage_errors.append(("4.dialogs_refresh", detail))
+            self._postbot_resolve_log("4.dialogs_refresh", False, detail)
+
+        # 5차: refresh된 dialogs에서 username을 대소문자 무시(normalize)로 직접 검색
+        try:
+            if dialogs is None:
+                raise RuntimeError("dialogs refresh failed; lookup unavailable")
+
             for dialog in dialogs:
                 entity = getattr(dialog, "entity", None)
                 username = normalize_username(getattr(entity, "username", ""))
                 if entity is not None and username == normalized:
                     self._postbot_resolve_log(
-                        "4.dialogs_lookup",
+                        "5.dialogs_search",
                         True,
                         display_username,
                         entity,
@@ -393,14 +413,14 @@ class TelegramService:
             if access_error:
                 raise access_error
             detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
-            stage_errors.append(("4.dialogs_lookup", detail))
-            self._postbot_resolve_log("4.dialogs_lookup", False, detail)
+            stage_errors.append(("5.dialogs_search", detail))
+            self._postbot_resolve_log("5.dialogs_search", False, detail)
 
-        # dialogs refresh가 entity cache를 갱신했을 수 있으므로 마지막 재시도
+        # 6차: dialogs refresh가 entity cache를 갱신했을 수 있으므로 마지막 재시도
         try:
             entity = await client.get_input_entity(display_username)
             self._postbot_resolve_log(
-                "5.get_input_entity_after_refresh",
+                "6.get_input_entity_after_refresh",
                 True,
                 display_username,
                 entity,
@@ -411,9 +431,9 @@ class TelegramService:
             if access_error:
                 raise access_error
             detail = f"{type(e).__name__}: {str(e).strip() or type(e).__name__}"
-            stage_errors.append(("5.get_input_entity_after_refresh", detail))
+            stage_errors.append(("6.get_input_entity_after_refresh", detail))
             self._postbot_resolve_log(
-                "5.get_input_entity_after_refresh",
+                "6.get_input_entity_after_refresh",
                 False,
                 detail,
             )
