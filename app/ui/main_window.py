@@ -2389,7 +2389,7 @@ class MainWindow(QMainWindow):
 
     def _postbot_check_worker(self, accounts, username, post_value):
         async def runner():
-            errors = []
+            failures = []
             for account in accounts:
                 label = (
                     account.get("phone")
@@ -2408,7 +2408,19 @@ class MainWindow(QMainWindow):
                     result["checked_account"] = label
                     return result
                 except Exception as e:
-                    errors.append(f"{label}: {type(e).__name__}: {e}")
+                    code = getattr(e, "code", type(e).__name__)
+                    raw = f"{type(e).__name__}: {e}"
+                    failures.append({
+                        "label": label,
+                        "code": str(code or ""),
+                        "raw": raw,
+                    })
+                    self.logs.write(
+                        "ERROR",
+                        "PostBot",
+                        f"상태체크 계정 실패 / {label} / code={code} / {raw}",
+                        account_id=account.get("id"),
+                    )
                 finally:
                     if client is not None:
                         try:
@@ -2416,18 +2428,41 @@ class MainWindow(QMainWindow):
                         except Exception:
                             pass
 
+            codes = {item["code"] for item in failures}
+            if codes and codes.issubset({"SESSION_ERROR"}):
+                raise RuntimeError(
+                    "Telegram 로그인 세션이 유효하지 않습니다. 계정을 다시 연결해주세요."
+                )
+            if "POSTBOT_RESULT_NOT_FOUND" in codes:
+                raise RuntimeError(
+                    "PostBot 계정은 확인했지만 해당 게시물을 찾지 못했습니다. "
+                    "게시물 코드 또는 링크를 확인해주세요."
+                )
+            if "POSTBOT_ACCESS_DENIED" in codes:
+                raise RuntimeError(
+                    "현재 Telegram 계정에서 해당 게시물에 접근할 수 없습니다."
+                )
+            if "POSTBOT_BOT_NOT_FOUND" in codes:
+                raise RuntimeError(
+                    "PostBot 계정을 Telegram에서 확인하지 못했습니다. "
+                    "잠시 후 다시 시도해주세요."
+                )
+
             raise RuntimeError(
-                "모든 정상 계정에서 PostBot 확인에 실패했습니다. "
-                + " | ".join(errors[:5])
+                "PostBot 게시물 확인 중 오류가 발생했습니다. "
+                "작업 로그에서 상세 원인을 확인해주세요."
             )
 
         try:
             result = asyncio.run(runner())
-            self.bridge.작업완료.emit("포스트봇체크", {"ok": True, "result": result})
+            self.bridge.작업완료.emit(
+                "포스트봇체크",
+                {"ok": True, "result": result},
+            )
         except Exception as e:
             self.bridge.작업완료.emit(
                 "포스트봇체크",
-                {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                {"ok": False, "error": str(e)},
             )
 
     def accounts_page(self):
